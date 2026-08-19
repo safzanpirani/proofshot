@@ -82,7 +82,7 @@ agent-browser snapshot -i                                    # See interactive e
 agent-browser open http://localhost:3000/login               # Navigate
 agent-browser fill @e2 "test@example.com"                    # Fill form
 agent-browser click @e5                                      # Click submit
-agent-browser screenshot ./proofshot-artifacts/step-login.png # Capture proof
+proofshot exec screenshot step-login.png                      # Capture proof (path is relative to the session folder)
 
 # 3. Stop — bundle video + screenshots + errors into proof artifacts
 proofshot stop

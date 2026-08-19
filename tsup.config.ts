@@ -7,7 +7,7 @@ const packageJson = JSON.parse(
 
 export default defineConfig([
   {
-    entry: { 'bin/proofshot': 'bin/proofshot.ts' },
+    entry: { 'bin/proofshot': 'bin/proofshot.ts', 'bin/log-pump': 'bin/log-pump.ts' },
     format: ['esm'],
     target: 'node18',
     platform: 'node',

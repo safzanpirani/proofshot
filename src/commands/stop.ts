@@ -7,6 +7,7 @@ import { setAgentBrowserDefaults } from '../utils/exec.js';
 import { closeBrowser, getConsoleErrors, getConsoleOutput, getConsoleOutputJson } from '../browser/session.js';
 import { stopRecording } from '../browser/capture.js';
 import { loadSession, clearSession } from '../session/state.js';
+import { terminateProcessTree } from '../utils/process.js';
 import { writeViewer, type TimestampedLogEntry } from '../artifacts/viewer.js';
 import { extractServerErrors } from '../utils/error-patterns.js';
 import { loadSessionLog } from './exec.js';
@@ -138,10 +139,18 @@ export async function stopCommand(options: StopOptions): Promise<void> {
   }
 
   // Step 6: Count errors
-  const consoleErrorLines = consoleErrors
+  // `agent-browser errors` only reports uncaught page exceptions. Explicit
+  // console.error() calls arrive as console messages typed "error", and were
+  // previously captured to console-output.log but reported as zero.
+  const consoleErrorMessages = consoleEntries
+    .filter((entry) => entry.text.startsWith('[error]'))
+    .map((entry) => entry.text.replace(/^\[error\]\s*/, ''));
+
+  const pageErrorLines = consoleErrors
     .split('\n')
     .filter((l) => l.trim() && l.trim() !== 'No errors');
-  const consoleErrorCount = consoleErrorLines.length > 0 && consoleErrors.trim() !== '' ? consoleErrorLines.length : 0;
+  const consoleErrorLines = [...pageErrorLines, ...consoleErrorMessages];
+  const consoleErrorCount = consoleErrorLines.length;
 
   // Extract errors from server log using multi-language patterns
   const serverErrorLines = extractServerErrors(serverLog);
@@ -158,7 +167,7 @@ export async function stopCommand(options: StopOptions): Promise<void> {
     port: session.port,
     videoPath: session.videoPath,
     screenshots,
-    consoleErrors,
+    consoleErrors: consoleErrorLines.join('\n'),
     consoleErrorCount,
     serverLog,
     serverErrorCount,
@@ -209,6 +218,18 @@ export async function stopCommand(options: StopOptions): Promise<void> {
   });
 
   // Step 8: Clear session state
+  // Shut down the dev server proofshot started. Previously the process tree was
+  // only killed when startup failed, so every completed session leaked a server
+  // holding the port -- the next run then had to kill it to get the port back.
+  if (session.serverPumpPid) {
+    try {
+      terminateProcessTree(session.serverPumpPid);
+      console.log(chalk.dim('Dev server stopped'));
+    } catch {
+      // Already gone.
+    }
+  }
+
   clearSession(outputDir);
 
   // Step 9: Print results

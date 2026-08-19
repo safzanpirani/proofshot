@@ -85,16 +85,18 @@ export async function startCommand(options: StartOptions): Promise<void> {
   });
 
   let serverAlreadyRunning = true;
+  let serverPumpPid: number | null = null;
 
   if (options.run) {
     console.log(chalk.dim(`Starting: ${options.run}`));
     try {
-      await ensureDevServer(
+      const serverResult = await ensureDevServer(
         options.run,
         config.devServer.port,
         config.devServer.startupTimeout,
         serverErrorLog,
       );
+      serverPumpPid = serverResult.pumpPid;
       serverAlreadyRunning = false;
       console.log(chalk.green('✓') + ` Dev server started on :${config.devServer.port}`);
       console.log(chalk.dim(`  Server logs → ${serverErrorLog}`));
@@ -171,6 +173,7 @@ export async function startCommand(options: StartOptions): Promise<void> {
     port: config.devServer.port,
     serverCommand: options.run || null,
     serverAlreadyRunning,
+    serverPumpPid,
     recordingActive: true,
     viewport: { width: config.viewport.width, height: config.viewport.height },
   });

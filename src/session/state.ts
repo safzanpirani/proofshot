@@ -14,6 +14,8 @@ export interface SessionState {
   port: number;
   serverCommand: string | null;
   serverAlreadyRunning: boolean;
+  /** PID of the detached log pump owning the dev server, if proofshot started it. */
+  serverPumpPid?: number | null;
   recordingActive: boolean;
   viewport?: { width: number; height: number };
 }

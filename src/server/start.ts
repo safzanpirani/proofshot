@@ -1,4 +1,6 @@
 import * as fs from 'fs';
+import { spawn } from 'child_process';
+import { fileURLToPath } from 'url';
 import { Transform } from 'stream';
 import { isPortOpen, waitForPort } from '../utils/port.js';
 import {
@@ -11,6 +13,8 @@ import {
 export interface ServerStartResult {
   alreadyRunning: boolean;
   port: number;
+  /** PID of the detached log pump owning the dev server, or null if we didn't start one. */
+  pumpPid: number | null;
 }
 
 /**
@@ -83,17 +87,27 @@ export async function ensureDevServer(
     }
   }
 
-  const proc = spawnShellCommand(command, {
+  // Run the server under a detached log pump. Piping its stdio through this
+  // process would keep our event loop alive forever -- `proofshot start` never
+  // exited, which hung every agent-driven session.
+  // tsup emits the pump next to the CLI bundle (dist/bin/); the library bundle
+  // lives in dist/src/, so check both rather than assuming one layout.
+  const pumpCandidates = [
+    new URL('./log-pump.js', import.meta.url),
+    new URL('../bin/log-pump.js', import.meta.url),
+  ].map((url) => fileURLToPath(url));
+  const pumpScript = pumpCandidates.find((candidate) => fs.existsSync(candidate));
+  if (!pumpScript) {
+    throw new Error(
+      `Could not locate log-pump.js (looked in: ${pumpCandidates.join(', ')}). ` +
+        'Reinstall proofshot or run "npm run build".',
+    );
+  }
+  const proc = spawn(process.execPath, [pumpScript, logPath, command], {
     cwd: process.cwd(),
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: 'ignore',
     detached: true,
   });
-
-  const logStream = fs.createWriteStream(logPath, { flags: 'a' });
-  const tsOut = createTimestampTransform();
-  const tsErr = createTimestampTransform();
-  proc.stdout?.pipe(tsOut).pipe(logStream, { end: false });
-  proc.stderr?.pipe(tsErr).pipe(logStream, { end: false });
 
   proc.unref();
 
@@ -116,5 +130,5 @@ export async function ensureDevServer(
   // Small delay for stability
   await new Promise((resolve) => setTimeout(resolve, 1000));
 
-  return { alreadyRunning: false, port };
+  return { alreadyRunning: false, port, pumpPid: proc.pid ?? null };
 }
