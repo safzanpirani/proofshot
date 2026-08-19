@@ -1,106 +1,136 @@
 ---
 name: proofshot
-description: Visual verification of UI features. Use after building or modifying any
-  UI component, page, or visual feature. Starts a verification session with video
-  recording and error capture, then you drive the browser to test, then stop to
-  bundle proof artifacts for the human.
-allowed-tools: Bash(proofshot:*), Bash(agent-browser:*)
+description: Visual verification of UI work, including before/after comparisons. Use
+  after building or modifying any UI component, page, or visual feature, and whenever
+  the user asks for a demo, proof, screen recording, or a "before and after" of a
+  change. Records the browser, captures screenshots, collects console and server
+  errors, and bundles proof artifacts for the human to review.
+allowed-tools: Bash(proofshot:*), Bash(agent-browser:*), Bash(git:*)
 ---
 
 # ProofShot — Visual Verification Workflow
 
-ProofShot is an open-source, agent-agnostic CLI that lets you verify your own work in a real browser — video proof, screenshots, and error reports, no vendor lock-in.
+Verify your own work in a real browser and hand the human video proof, screenshots, and an error report.
 
-## When to use
+## Which mode
 
-Use ProofShot after:
-- Building a new UI feature or page
-- Modifying existing UI components
-- Fixing a visual bug
-- Any change that affects what the user sees
+- **"before and after"**, "show me what changed", "prove the fix works" → **Before/After mode** below. This is the default whenever the user's wording compares old behaviour to new.
+- Anything else visual ("verify this", "record a demo", "screenshot it") → **Single-session mode**.
 
-Skip it when the change has no visual surface (backend jobs, libraries, pure CLI
-work). There is nothing to record, and a reasoning-only report is just noise.
+Skip ProofShot entirely when the change has no visual surface (backend jobs, libraries, pure CLI work).
 
-## The workflow (always follow these 3 steps)
+---
 
-### Step 1: Start the session
+## Before/After mode
+
+Records the same flow twice: once against the pre-change code in a throwaway git
+worktree, once against the working tree. Run every step without asking the user
+for more input — they already asked for before/after, that is the whole brief.
+
+### 1. Resolve the base commit
 
 ```bash
-proofshot start --run "your-dev-command" --port PORT --description "what you are about to verify"
+git rev-parse --short HEAD                       # uncommitted change → base is HEAD
+git merge-base HEAD origin/main                  # change already committed on a branch
 ```
 
-This opens a browser and begins recording. If the port is already in use, proofshot will kill the existing process automatically.
+Use `HEAD` when `git status --porcelain` shows the change is uncommitted. Use the
+merge-base against the default branch when the change is already committed.
+If neither resolves, say so and fall back to Single-session mode — do not invent a base.
 
-**Always use `--run`** to let proofshot start and capture your dev server output (server logs appear in the proof report).
-Only omit `--run` if the server was explicitly started by the user or another process — without it, no server logs are captured.
-
-`start` returns as soon as the session is live; the dev server keeps running in
-the background under a detached log pump. Do not background this command or pipe
-it into a waiter — it is not supposed to block.
-
-If a previous session was not stopped cleanly, add `--force` to override it.
-
-### Step 2: Drive the browser and test
-
-Use proofshot exec to navigate, interact, and verify:
+### 2. Check out the base into a worktree
 
 ```bash
-proofshot exec snapshot -i                                    # See interactive elements
-proofshot exec open http://localhost:PORT/page                # Navigate to a page
-proofshot exec click @e3                                      # Click a button
-proofshot exec fill @e2 "test@example.com"                    # Fill a form field
-proofshot exec screenshot step-NAME.png                       # Capture key moments
+git worktree add --detach /tmp/proof-before <BASE_SHA>
 ```
 
-Take screenshots at important moments — these become the visual proof.
-Verify what you expect to see by reading the snapshot output.
+For projects with dependencies, link rather than reinstall:
+`ln -s "$(pwd)/node_modules" /tmp/proof-before/node_modules`. Reinstalling in the
+worktree is usually a slow mistake.
 
-**Screenshot paths are relative to the session folder.** Pass a bare filename
-(`step-login.png`). Do not prefix it with `./proofshot-artifacts/` — that
-resolves inside the session folder and fails with "No such file or directory".
+### 3. Record BEFORE (old code)
 
-### Step 3: Stop and bundle the proof
+Run from the **repo root**, with the dev server pointed at the worktree, on its
+own port. Both runs then land side by side in `./proofshot-artifacts/`.
 
 ```bash
+proofshot start --run "<dev command for /tmp/proof-before>" --port 8801 --description "BEFORE <what changed>"
+proofshot exec open http://localhost:8801/<route>
+proofshot exec screenshot state-initial.png
+# ...drive the flow...
+proofshot exec screenshot state-final.png
 proofshot stop
 ```
 
-This stops recording, collects console + server errors, generates SUMMARY.md and
-viewer.html, and shuts down the dev server it started. You do not need to kill
-the server yourself.
+If the flow cannot complete on the base because the feature did not exist yet,
+that is a valid result. Capture what *is* there, and say plainly in your report
+that the step was absent before.
 
-**Read the error counts it prints.** `Console errors` covers both uncaught page
-exceptions and explicit `console.error(...)` calls. A non-zero count means you
-have not finished: fix the cause and re-run the workflow before reporting done.
+### 4. Record AFTER (working tree)
 
-### Step 4 (optional): Post proof to the PR
+Repeat step 3 against the working tree on a different port, with description
+`AFTER <what changed>` — and **the same screenshot filenames and the same
+actions**. Identical names are what let the human pair the shots.
+
+### 5. Clean up and report
 
 ```bash
-proofshot pr              # Auto-detect PR from current branch
-proofshot pr 42           # Target a specific PR number
+git worktree remove --force /tmp/proof-before
 ```
 
-This uploads screenshots and video to GitHub and posts a formatted comment on the PR. By default it uses the official GitHub contents API on a `proofshot-artifacts` branch. Use `--upload-provider github-web-attachments` if you specifically want GitHub attachment URLs.
+Then give the user both session folders, and name the visible difference per
+screenshot pair. Do not just hand over two paths — say what changed.
+
+---
+
+## Single-session mode
+
+```bash
+proofshot start --run "your-dev-command" --port PORT --description "what you are verifying"
+proofshot exec snapshot -i                     # See interactive elements
+proofshot exec open http://localhost:PORT/page
+proofshot exec click @e3
+proofshot exec fill @e2 "test@example.com"
+proofshot exec screenshot step-NAME.png
+proofshot stop
+```
+
+Optionally post the result to the pull request:
+
+```bash
+proofshot pr          # auto-detect PR from branch
+proofshot pr 42       # specific PR
+```
+
+---
+
+## Rules that keep runs from failing
+
+- **Screenshot paths are relative to the session folder.** Pass a bare filename
+  (`step-login.png`). Prefixing `./proofshot-artifacts/` resolves inside the
+  session folder and fails with "No such file or directory".
+- **`start` returns immediately** once the session is live; the dev server keeps
+  running under a detached pump. Never background it or wrap it in a waiter.
+- **`stop` shuts down the dev server it started.** Do not kill it yourself.
+- **Give each concurrent-ish run its own port.** `start` kills whatever occupies
+  the target port, so reusing one port across a before/after pair can take out
+  the other server.
+- **Always pass `--run`** so server logs are captured. Without it there are none.
+- **Read the error counts `stop` prints.** `Console errors` covers uncaught
+  exceptions *and* explicit `console.error(...)`. Non-zero means you are not
+  done: fix the cause and re-run before reporting success.
 
 ## Reporting honestly
 
 A recording proves the happy path renders and runs. It does not prove edge cases
 or regressions are absent. Say "here is the flow working", not "verified, no
-bugs" — and keep tests as the actual correctness gate.
+bugs" — tests remain the correctness gate.
 
-Never hand-edit files under `proofshot-artifacts/` to make a report look better.
-The artifact is evidence; doctoring it makes it worthless.
+Never hand-edit anything under `proofshot-artifacts/` to make a report look
+better. The artifact is evidence; doctoring it makes it worthless.
 
 ## Troubleshooting
 
 - `proofshot doctor` — checks agent-browser, ffmpeg, and the active session
 - `proofshot clean` — removes artifacts and clears a stuck session
-- No server logs in the report? The port was already occupied, so proofshot
-  skipped spawning and never owned the server's output.
-
-## Tips
-
-- Always include a meaningful --description so the human knows what was tested
-- Take screenshots before AND after key actions (e.g., before form submit, after redirect)
-- If you find errors during verification, fix them and re-run the workflow
+- No server logs? The port was already occupied, so proofshot never owned the server.

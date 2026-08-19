@@ -178,6 +178,12 @@ export async function startCommand(options: StartOptions): Promise<void> {
     viewport: { width: config.viewport.width, height: config.viewport.height },
   });
 
+  // `exec`/`stop` look in the configured output dir. If --output moved this
+  // session elsewhere, leave a breadcrumb there so they can still find it.
+  if (options.output) {
+    writeSessionPointer(path.resolve(loadConfig().output), outputDir);
+  }
+
   console.log('');
   console.log(chalk.green.bold('✅ ProofShot session started'));
   console.log('');
