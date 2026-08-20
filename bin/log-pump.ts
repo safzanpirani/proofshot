@@ -14,6 +14,7 @@
  */
 import { spawn } from 'child_process';
 import * as fs from 'fs';
+import { getShellExecutable, terminateProcessTree } from '../src/utils/process.js';
 
 const [, , logPath, ...commandParts] = process.argv;
 
@@ -23,10 +24,15 @@ if (!logPath || commandParts.length === 0) {
 }
 
 const command = commandParts.join(' ');
-const shell = process.platform === 'win32' ? true : '/bin/sh';
 const logStream = fs.createWriteStream(logPath, { flags: 'a' });
 
-const child = spawn(command, { stdio: ['ignore', 'pipe', 'pipe'], shell });
+// Deliberately NOT detached on POSIX: the child stays in the pump's process
+// group, so `stop` killing the pump's group (-pid) takes the dev server with
+// it. On Windows `taskkill /F /T` walks the tree, which has the same effect.
+const child = spawn(command, {
+  stdio: ['ignore', 'pipe', 'pipe'],
+  shell: getShellExecutable(),
+});
 
 /** Emit whole lines only, so a timestamp always starts a record. */
 function pump(stream: NodeJS.ReadableStream | null): void {
@@ -57,8 +63,16 @@ child.on('exit', (code) => {
 
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.on(signal, () => {
+    // On Windows the child is a cmd.exe wrapper, so signalling it orphans the
+    // real server -- taskkill /T is the only way to get the whole tree. On
+    // POSIX the child is not a group leader, so a negative-PID kill would hit
+    // the wrong group; signal the child directly and let its group die with us.
     try {
-      if (child.pid) process.kill(-child.pid, signal);
+      if (child.pid && process.platform === 'win32') {
+        terminateProcessTree(child.pid);
+      } else {
+        child.kill(signal);
+      }
     } catch {
       child.kill(signal);
     }

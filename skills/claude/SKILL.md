@@ -40,13 +40,24 @@ If neither resolves, say so and fall back to Single-session mode — do not inve
 
 ### 2. Check out the base into a worktree
 
+Put it in a temp directory **outside** the repo, so it never shows up in status
+or gets swept by a clean:
+
 ```bash
-git worktree add --detach /tmp/proof-before <BASE_SHA>
+git worktree add --detach "${TMPDIR:-/tmp}/proof-before" <BASE_SHA>   # macOS / Linux
+git worktree add --detach "%TEMP%\proof-before" <BASE_SHA>            # Windows
 ```
 
-For projects with dependencies, link rather than reinstall:
-`ln -s "$(pwd)/node_modules" /tmp/proof-before/node_modules`. Reinstalling in the
-worktree is usually a slow mistake.
+For projects with dependencies, link rather than reinstall — reinstalling in the
+worktree is usually a slow mistake:
+
+```bash
+ln -s "$(pwd)/node_modules" "$WORKTREE/node_modules"                  # macOS / Linux
+cmd /c mklink /J "%WORKTREE%\node_modules" "%CD%\node_modules"        # Windows (junction)
+```
+
+Skip the link and install properly when the project has native modules or is a
+monorepo with workspace-relative paths — a linked `node_modules` is wrong there.
 
 ### 3. Record BEFORE (old code)
 
@@ -54,7 +65,7 @@ Run from the **repo root**, with the dev server pointed at the worktree, on its
 own port. Both runs then land side by side in `./proofshot-artifacts/`.
 
 ```bash
-proofshot start --run "<dev command for /tmp/proof-before>" --port 8801 --description "BEFORE <what changed>"
+proofshot start --run "<dev command run against $WORKTREE>" --port 8801 --description "BEFORE <what changed>"
 proofshot exec open http://localhost:8801/<route>
 proofshot exec screenshot state-initial.png
 # ...drive the flow...
@@ -75,8 +86,11 @@ actions**. Identical names are what let the human pair the shots.
 ### 5. Clean up and report
 
 ```bash
-git worktree remove --force /tmp/proof-before
+git worktree remove --force "$WORKTREE"
 ```
+
+Always run this, even if the recording failed — a stale worktree makes the next
+before/after run fail with "already exists".
 
 Then give the user both session folders, and name the visible difference per
 screenshot pair. Do not just hand over two paths — say what changed.
@@ -119,6 +133,18 @@ proofshot pr 42       # specific PR
 - **Read the error counts `stop` prints.** `Console errors` covers uncaught
   exceptions *and* explicit `console.error(...)`. Non-zero means you are not
   done: fix the cause and re-run before reporting success.
+
+## On Windows
+
+- Run from **PowerShell or cmd**, not Git Bash. `--run` goes through `ComSpec`
+  (cmd.exe), so a command written for `sh` will not parse.
+- Quote paths containing spaces in `--run`, and prefer forward slashes in URLs
+  even when the filesystem path uses backslashes.
+- `stop` uses `taskkill /F /T` to take the dev server down, since Windows has no
+  process groups. If a server somehow survives, `netstat -ano | findstr :PORT`
+  then `taskkill /F /PID <pid>`.
+- Use a junction (`mklink /J`), not a symlink, to share `node_modules` into a
+  worktree — symlinks need Developer Mode or admin.
 
 ## Reporting honestly
 

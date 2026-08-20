@@ -47,20 +47,24 @@ export function parseWindowsNetstatOutput(output: string, port: number): number[
   return [...pids];
 }
 
-export function findPidsListeningOnPort(port: number): number[] {
+export function findPidsListeningOnPort(
+  port: number,
+  platform = process.platform,
+  execFn: ExecSyncLike = execSync,
+): number[] {
   try {
-    if (process.platform === 'win32') {
-      const output = execSync('netstat -ano -p tcp', {
+    if (platform === 'win32') {
+      const output = execFn('netstat -ano -p tcp', {
         encoding: 'utf-8',
         stdio: ['pipe', 'pipe', 'pipe'],
-      });
+      }) as string;
       return parseWindowsNetstatOutput(output, port);
     }
 
-    const output = execSync(`lsof -ti:${port}`, {
+    const output = (execFn(`lsof -ti:${port}`, {
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
+    }) as string).trim();
 
     return output
       .split(/\r?\n/)
@@ -71,30 +75,43 @@ export function findPidsListeningOnPort(port: number): number[] {
   }
 }
 
-export function killPids(pids: number[]): boolean {
+export function killPids(
+  pids: number[],
+  platform = process.platform,
+  execFn: ExecSyncLike = execSync,
+): boolean {
   if (pids.length === 0) return false;
 
   try {
-    if (process.platform === 'win32') {
+    if (platform === 'win32') {
       const pidArgs = pids.map((pid) => `/PID ${pid}`).join(' ');
-      execSync(`taskkill /F /T ${pidArgs}`, { stdio: 'pipe' });
+      execFn(`taskkill /F /T ${pidArgs}`, { stdio: 'pipe' });
       return true;
     }
 
-    execSync(`kill -9 ${pids.join(' ')}`, { stdio: 'pipe' });
+    execFn(`kill -9 ${pids.join(' ')}`, { stdio: 'pipe' });
     return true;
   } catch {
     return false;
   }
 }
 
-export function terminateProcessTree(pid: number): void {
-  if (process.platform === 'win32') {
-    execSync(`taskkill /F /T /PID ${pid}`, { stdio: 'pipe' });
+export function terminateProcessTree(
+  pid: number,
+  platform = process.platform,
+  execFn: ExecSyncLike = execSync,
+  killFn: (pid: number, signal: NodeJS.Signals) => void = (p, sig) => process.kill(p, sig),
+): void {
+  if (platform === 'win32') {
+    // Windows has no process groups to signal; /T walks the child tree, which
+    // is the only way to take a shell-wrapped dev server down with its parent.
+    execFn(`taskkill /F /T /PID ${pid}`, { stdio: 'pipe' });
     return;
   }
 
-  process.kill(-pid, 'SIGKILL');
+  // Negative PID = kill the whole process group. Requires `pid` to be a group
+  // leader, which is why the log pump is spawned detached.
+  killFn(-pid, 'SIGKILL');
 }
 
 export function findExecutablePath(
