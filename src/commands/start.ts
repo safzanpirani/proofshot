@@ -12,6 +12,7 @@ import {
   hasActiveSession,
   clearSession,
   generateAgentBrowserSessionName,
+  writeSessionPointer,
 } from '../session/state.js';
 import { writeMetadata } from '../session/metadata.js';
 
@@ -27,6 +28,7 @@ interface StartOptions {
 
 export async function startCommand(options: StartOptions): Promise<void> {
   const config = loadConfig();
+  const defaultOutputDir = path.resolve(config.output);
   setAgentBrowserDefaults({ configPath: config.browser.configPath });
   if (options.port) config.devServer.port = options.port;
   if (options.output) config.output = options.output;
@@ -181,7 +183,7 @@ export async function startCommand(options: StartOptions): Promise<void> {
   // `exec`/`stop` look in the configured output dir. If --output moved this
   // session elsewhere, leave a breadcrumb there so they can still find it.
   if (options.output) {
-    writeSessionPointer(path.resolve(loadConfig().output), outputDir);
+    writeSessionPointer(defaultOutputDir, outputDir);
   }
 
   console.log('');

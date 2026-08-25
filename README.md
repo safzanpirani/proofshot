@@ -76,9 +76,12 @@ Three-step workflow: **start**, **test**, **stop**.
 ```bash
 # 1. Start — open browser, begin recording, capture server logs
 proofshot start --run "npm run dev" --port 3000 --description "Login form verification"
+# If the project volume is low on space, put artifacts elsewhere:
+proofshot start --output /tmp/proofshot-artifacts --port 3000 --description "Login form verification"
 
 # 2. Test — the AI agent drives the browser
 agent-browser snapshot -i                                    # See interactive elements
+proofshot snapshot -i                                        # Logged shorthand during a session
 agent-browser open http://localhost:3000/login               # Navigate
 agent-browser fill @e2 "test@example.com"                    # Fill form
 agent-browser click @e5                                      # Click submit

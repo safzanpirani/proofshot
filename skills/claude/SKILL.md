@@ -102,6 +102,7 @@ screenshot pair. Do not just hand over two paths — say what changed.
 ```bash
 proofshot start --run "your-dev-command" --port PORT --description "what you are verifying"
 proofshot exec snapshot -i                     # See interactive elements
+proofshot snapshot -i                          # Equivalent shorthand
 proofshot exec open http://localhost:PORT/page
 proofshot exec click @e3
 proofshot exec fill @e2 "test@example.com"
@@ -120,6 +121,13 @@ proofshot pr 42       # specific PR
 
 ## Rules that keep runs from failing
 
+- **Target elements by `@eN` ref, CSS, or `find`. Never Playwright syntax.**
+  `text=Today`, `role=button`, `placeholder=Email` are not accepted and fail with
+  a bare "Element not found", which reads exactly like a missing page. Use
+  `proofshot exec snapshot -i` and click the `@eN` it prints, a CSS selector, or
+  `proofshot exec find text Today click`.
+- **"Element not found" almost never means the page is gone.** Check the selector
+  first; re-navigating hides the real cause and wastes the run.
 - **Screenshot paths are relative to the session folder.** Pass a bare filename
   (`step-login.png`). Prefixing `./proofshot-artifacts/` resolves inside the
   session folder and fails with "No such file or directory".
@@ -130,6 +138,8 @@ proofshot pr 42       # specific PR
   the target port, so reusing one port across a before/after pair can take out
   the other server.
 - **Always pass `--run`** so server logs are captured. Without it there are none.
+- **Use `--output /path` when the project volume is low on space.** The active
+  session remains discoverable by `exec` and `stop` through its session pointer.
 - **Read the error counts `stop` prints.** `Console errors` covers uncaught
   exceptions *and* explicit `console.error(...)`. Non-zero means you are not
   done: fix the cause and re-run before reporting success.

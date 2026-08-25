@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   hasActiveSession: vi.fn(),
   clearSession: vi.fn(),
   generateAgentBrowserSessionName: vi.fn(),
+  writeSessionPointer: vi.fn(),
   writeMetadata: vi.fn(),
   execSync: vi.fn(),
 }));
@@ -46,6 +47,7 @@ vi.mock('../session/state.js', () => ({
   hasActiveSession: mocks.hasActiveSession,
   clearSession: mocks.clearSession,
   generateAgentBrowserSessionName: mocks.generateAgentBrowserSessionName,
+  writeSessionPointer: mocks.writeSessionPointer,
 }));
 
 vi.mock('../session/metadata.js', () => ({
@@ -130,5 +132,16 @@ describe('startCommand', () => {
     expect(mocks.closeBrowser).toHaveBeenCalledTimes(1);
     expect(mocks.startRecording).not.toHaveBeenCalled();
     expect(mocks.saveSession).not.toHaveBeenCalled();
+  });
+
+  it('records a pointer when a custom output directory is used', async () => {
+    mocks.startRecording.mockImplementation(() => {});
+
+    await startCommand({ output: '/tmp/proofshot-low-space' });
+
+    expect(mocks.writeSessionPointer).toHaveBeenCalledWith(
+      expect.stringContaining('proofshot-artifacts'),
+      '/tmp/proofshot-low-space',
+    );
   });
 });

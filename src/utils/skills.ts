@@ -64,6 +64,7 @@ Use proofshot exec to navigate, interact, and verify:
 
 \`\`\`bash
 proofshot exec snapshot -i                                    # See interactive elements
+proofshot snapshot -i                                         # Equivalent shorthand
 proofshot exec open http://localhost:PORT/page                # Navigate to a page
 proofshot exec click @e3                                      # Click a button
 proofshot exec fill @e2 "test@example.com"                    # Fill a form field
@@ -72,6 +73,9 @@ proofshot exec screenshot step-NAME.png                       # Capture key mome
 
 Take screenshots at important moments — these become the visual proof.
 Verify what you expect to see by reading the snapshot output.
+
+If the project volume is low on space, start with \`--output\` pointing at a
+writable temp directory or another volume.
 
 ### Step 3: Stop and bundle the proof
 
@@ -118,6 +122,7 @@ After modifying UI files, visually verify changes with this workflow:
 
 Key proofshot exec commands:
 - \`proofshot exec snapshot -i\` — see interactive elements
+- \`proofshot snapshot -i\` — equivalent shorthand
 - \`proofshot exec click @e3\` — click an element
 - \`proofshot exec fill @e2 "text"\` — fill a form field
 - \`proofshot exec screenshot step.png\` — capture a moment
@@ -138,10 +143,12 @@ After building or modifying UI features, verify with this workflow:
 
 Key proofshot exec commands:
 - \`proofshot exec snapshot -i\` — see interactive elements
+- \`proofshot snapshot -i\` — equivalent shorthand
 - \`proofshot exec click @e3\` — click an element
 - \`proofshot exec fill @e2 "text"\` — fill a form field
 - \`proofshot exec screenshot step.png\` — capture a moment
 
 Artifacts saved to ./proofshot-artifacts/ including video, screenshots, errors, and summary.
+Use \`proofshot start --output /path\` when the project volume is low on space.
 `;
 }

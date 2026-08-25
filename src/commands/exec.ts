@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { execSync } from 'child_process';
 import { loadConfig } from '../utils/config.js';
@@ -45,6 +46,36 @@ function resolveScreenshotPath(args: string[], sessionDir: string): string[] {
   // Resolve relative to session dir
   const resolved = path.join(sessionDir, screenshotPath);
   return [...args.slice(0, -1), resolved];
+}
+
+export function materializeCurlInput(args: string[]): {
+  args: string[];
+  cleanup: () => void;
+} {
+  const curlIndex = args.indexOf('--curl');
+  const sourcePath = curlIndex >= 0 ? args[curlIndex + 1] : undefined;
+  if (
+    args[0] !== 'cookies' ||
+    args[1] !== 'set' ||
+    !sourcePath?.startsWith('/dev/fd/')
+  ) {
+    return { args, cleanup: () => {} };
+  }
+
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'proofshot-curl-'));
+  const materializedPath = path.join(tempDir, 'cookies.txt');
+  try {
+    fs.copyFileSync(sourcePath, materializedPath);
+  } catch (error) {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    throw error;
+  }
+  return {
+    args: args.map((arg, index) => (
+      index === curlIndex + 1 ? materializedPath : arg
+    )),
+    cleanup: () => fs.rmSync(tempDir, { recursive: true, force: true }),
+  };
 }
 
 /**
@@ -192,10 +223,12 @@ export async function execCommand(args: string[]): Promise<void> {
     process.exit(1);
   }
 
+  const materialized = materializeCurlInput(args);
+
   // Resolve args (screenshot path rewriting)
-  let resolvedArgs = args;
+  let resolvedArgs = materialized.args;
   if (session) {
-    resolvedArgs = resolveScreenshotPath(args, session.sessionDir);
+    resolvedArgs = resolveScreenshotPath(resolvedArgs, session.sessionDir);
   }
 
   // Capture element data BEFORE execution (element may be gone after click navigation)
@@ -251,20 +284,74 @@ export async function execCommand(args: string[]): Promise<void> {
     const stdout = error?.stdout?.toString?.() || '';
     if (stdout) process.stdout.write(stdout);
     if (stderr) process.stderr.write(stderr);
-    process.exit(error?.status || 1);
+    const hint = describeSelectorSyntaxError(args, stderr);
+    if (hint) process.stderr.write(hint);
+    process.exitCode = error?.status || 1;
+    return;
+  } finally {
+    materialized.cleanup();
   }
 
   // If the action was `set viewport`, update cached viewport in session state
   if (session && args[0] === 'set' && args[1] === 'viewport') {
+    let actualViewport: { width: number; height: number } | null = null;
     try {
       const vpJson = ab("eval 'JSON.stringify({width: window.innerWidth, height: window.innerHeight})'", {
         session: session.sessionName,
       });
       const vp = JSON.parse(vpJson);
       session.viewport = { width: vp.width, height: vp.height };
+      actualViewport = session.viewport;
       saveSession(session);
     } catch {
       // Non-critical — viewport cache stays stale
     }
+    const requestedWidth = Number(args[2]);
+    const requestedHeight = Number(args[3]);
+    if (
+      actualViewport &&
+      (actualViewport.width !== requestedWidth || actualViewport.height !== requestedHeight)
+    ) {
+      console.error(
+        `Error: agent-browser reported success but the viewport remained ` +
+          `${actualViewport.width}x${actualViewport.height}; requested ` +
+          `${requestedWidth}x${requestedHeight}.`,
+      );
+      process.exit(1);
+    }
   }
+}
+
+/** Playwright-style engine prefixes that agent-browser's selectors do not accept. */
+const PLAYWRIGHT_SELECTOR_PREFIXES = ['text=', 'role=', 'label=', 'placeholder=', 'alt=', 'title=', 'testid='];
+
+/**
+ * agent-browser reports a missing element the same way whether the selector was
+ * wrong or the element genuinely isn't there. Agents read that as "the page is
+ * gone" and re-navigate, which never helps. When the selector is Playwright
+ * syntax, say so and give the two forms that do work.
+ */
+export function describeSelectorSyntaxError(args: string[], stderr: string): string | null {
+  if (!/not found/i.test(stderr)) return null;
+
+  const command = args[0]?.toLowerCase();
+  if (command !== 'click' && command !== 'fill' && command !== 'type' && command !== 'hover') {
+    return null;
+  }
+
+  const selector = args[1];
+  if (!selector) return null;
+
+  const prefix = PLAYWRIGHT_SELECTOR_PREFIXES.find((candidate) => selector.startsWith(candidate));
+  if (!prefix) return null;
+
+  const locator = prefix.slice(0, -1);
+  const value = selector.slice(prefix.length);
+
+  return (
+    `\nHint: "${selector}" is Playwright selector syntax, which agent-browser does not accept.\n` +
+    `The page is probably fine — re-navigating will not fix this. Use either:\n` +
+    `  proofshot exec find ${locator} ${value} ${command}\n` +
+    `  proofshot exec snapshot -i    # then target the @eN ref it prints\n`
+  );
 }

@@ -99,5 +99,23 @@ export function createCLI(): Command {
       await execCommand(args);
     });
 
+  program
+    .command('snapshot')
+    .description('Capture an interactive browser snapshot (shorthand for "proofshot exec snapshot")')
+    .argument('[args...]', 'snapshot options, such as -i')
+    .allowUnknownOption()
+    .action(async (args: string[] = []) => {
+      await execCommand(['snapshot', ...args]);
+    });
+
+  program
+    .command('screenshot')
+    .description('Save a screenshot into the session folder (shorthand for "proofshot exec screenshot")')
+    .argument('[args...]', 'screenshot filename, relative to the session folder')
+    .allowUnknownOption()
+    .action(async (args: string[] = []) => {
+      await execCommand(['screenshot', ...args]);
+    });
+
   return program;
 }
