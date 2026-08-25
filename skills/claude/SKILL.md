@@ -12,6 +12,21 @@ allowed-tools: Bash(proofshot:*), Bash(agent-browser:*), Bash(git:*)
 
 Verify your own work in a real browser and hand the human video proof, screenshots, and an error report.
 
+## Requirements
+
+```bash
+npm install -g agent-browser
+npm install -g github:safzanpirani/proofshot
+```
+
+Install from that fork rather than `npm i -g proofshot`. The published package is
+unmaintained since April 2026 and still has defects this workflow depends on:
+`start --run` never exits (hanging the agent), `console.error(...)` is captured
+but reported as zero errors, `--output` strands the session so the recording
+finalises at 0 bytes, the Windows teardown leaves the dev server running, and a
+Playwright-style selector fails with a bare "Element not found" that reads like a
+lost page. Check the install with `proofshot doctor`.
+
 ## Which mode
 
 - **"before and after"**, "show me what changed", "prove the fix works" → **Before/After mode** below. This is the default whenever the user's wording compares old behaviour to new.

@@ -48,3 +48,31 @@ describe('estimateTokenUsage', () => {
     expect(usage?.source).toBe('claude-logs');
   });
 });
+
+describe('estimateTokenUsage without a real usage source', () => {
+  let originalHome: string | undefined;
+
+  afterEach(() => {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    originalHome = undefined;
+  });
+
+  it('returns null rather than inventing usage from the action count', () => {
+    const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'proofshot-token-empty-'));
+    const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'proofshot-token-session-'));
+
+    // A session with plenty of actions — the old code turned this into
+    // "~2,500 input tokens, ~$0.03" out of nothing.
+    fs.writeFileSync(
+      path.join(sessionDir, 'session-log.json'),
+      JSON.stringify([{ action: 'click @e1' }, { action: 'fill @e2 hi' }, { action: 'snapshot -i' }]),
+    );
+
+    originalHome = process.env.HOME;
+    process.env.HOME = tmpHome;
+
+    const now = Date.now();
+    expect(estimateTokenUsage(sessionDir, now - 1000, now + 1000)).toBeNull();
+  });
+});
