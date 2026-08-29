@@ -5,13 +5,23 @@ import { execSync } from 'child_process';
 import { loadConfig } from '../utils/config.js';
 import { ab, buildAgentBrowserCommand, setAgentBrowserDefaults } from '../utils/exec.js';
 import { loadSession, saveSession, type SessionState } from '../session/state.js';
+import { writeJsonAtomic } from '../utils/atomic.js';
 
-const SESSION_LOG_FILENAME = 'session-log.json';
+const SESSION_LOG_FILENAME = 'session-log.jsonl';
+const RESULT_FILENAME = 'result.json';
 
 export interface SessionLogEntry {
   action: string;
   relativeTimeSec: number;
   timestamp: string;
+  startedAt: string;
+  finishedAt: string;
+  exitStatus: number;
+  success: boolean;
+  stderr?: string;
+  resultingUrl?: string;
+  screenshot?: { path: string; width: number; height: number };
+  assertion?: { type: string; expected?: string; passed: boolean; message: string };
   element?: {
     label: string;
     bbox: { x: number; y: number; width: number; height: number };
@@ -26,7 +36,7 @@ export function loadSessionLog(sessionDir: string): SessionLogEntry[] {
   const logPath = path.join(sessionDir, SESSION_LOG_FILENAME);
   if (!fs.existsSync(logPath)) return [];
   try {
-    return JSON.parse(fs.readFileSync(logPath, 'utf-8'));
+    return fs.readFileSync(logPath, 'utf-8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
   } catch {
     return [];
   }
@@ -39,13 +49,75 @@ export function loadSessionLog(sessionDir: string): SessionLogEntry[] {
 function resolveScreenshotPath(args: string[], sessionDir: string): string[] {
   if (args[0] !== 'screenshot' || args.length < 2) return args;
 
-  const screenshotPath = args[args.length - 1];
+  const viewportOnly = args.includes('--viewport-only');
+  const normalized = args.filter((arg) => arg !== '--viewport-only');
+  const screenshotPath = [...normalized].reverse().find((arg) => !arg.startsWith('-'))!;
   // If it's already absolute, leave it alone
-  if (path.isAbsolute(screenshotPath)) return args;
+  const withMode = viewportOnly || normalized.includes('--full') ? normalized : [...normalized, '--full'];
+  if (path.isAbsolute(screenshotPath)) return withMode;
 
   // Resolve relative to session dir
   const resolved = path.join(sessionDir, screenshotPath);
-  return [...args.slice(0, -1), resolved];
+  return withMode.map((arg) => arg === screenshotPath ? resolved : arg);
+}
+
+function parseBrowserValue(raw: string): unknown {
+  let value: unknown = raw;
+  for (let index = 0; index < 2 && typeof value === 'string'; index++) {
+    try { value = JSON.parse(value); } catch { break; }
+  }
+  return value;
+}
+
+function readPageUrl(sessionName: string): string {
+  const value = parseBrowserValue(ab(`eval ${JSON.stringify('window.location.href')}`, { session: sessionName }));
+  if (typeof value !== 'string') throw new Error('agent-browser returned an invalid page URL');
+  return value;
+}
+
+function redactStderr(stderr: string): string {
+  return stderr
+    .replace(/(token|password|secret|authorization|cookie)(\s*[:=]\s*)\S+/gi, '$1$2[REDACTED]')
+    .slice(0, 4000);
+}
+
+function pngDimensions(filePath: string): { width: number; height: number } | undefined {
+  try {
+    const bytes = fs.readFileSync(filePath);
+    if (bytes.length < 24 || bytes.toString('ascii', 1, 4) !== 'PNG') return undefined;
+    return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+  } catch { return undefined; }
+}
+
+function appendLog(sessionDir: string, entry: SessionLogEntry): void {
+  fs.appendFileSync(path.join(sessionDir, SESSION_LOG_FILENAME), JSON.stringify(entry) + '\n', { mode: 0o600 });
+}
+
+function runAssertion(args: string[], session: SessionState): NonNullable<SessionLogEntry['assertion']> {
+  const type = args[1];
+  const expected = args.slice(2).join(' ');
+  let passed = false;
+  let message = '';
+  if (type === 'visible' || type === 'absent') {
+    if (!expected) throw new Error(`assert ${type} requires text`);
+    const script = `(() => { const wanted=${JSON.stringify(expected)}; return [...document.querySelectorAll('body *')].some(e => e.textContent?.includes(wanted) && !!(e.offsetWidth||e.offsetHeight||e.getClientRects().length)); })()`;
+    const visible = Boolean(parseBrowserValue(ab(`eval ${JSON.stringify(script)}`, { session: session.sessionName })));
+    passed = type === 'visible' ? visible : !visible;
+    message = `${JSON.stringify(expected)} was ${visible ? 'visible' : 'not visible'}`;
+  } else if (type === 'url') {
+    const url = readPageUrl(session.sessionName);
+    passed = url.includes(expected);
+    message = `URL was ${url}`;
+  } else if (type === 'no-console-errors') {
+    const errors = ab('errors', { session: session.sessionName });
+    const consoleRaw = ab('console --json', { session: session.sessionName });
+    const messages = (JSON.parse(consoleRaw)?.data?.messages ?? []).filter((item: { type?: string }) => item.type === 'error');
+    passed = (!errors.trim() || errors.trim() === 'No errors') && messages.length === 0;
+    message = passed ? 'No console errors were captured' : 'Console errors were captured';
+  } else {
+    throw new Error(`Unknown assertion ${type}. Use visible, absent, url, or no-console-errors.`);
+  }
+  return { type, expected: expected || undefined, passed, message };
 }
 
 export function materializeCurlInput(args: string[]): {
@@ -240,37 +312,33 @@ export async function execCommand(args: string[]): Promise<void> {
     if (captured) elementData = captured;
   }
 
-  // Log the action if a session is active
-  if (session) {
-    const now = new Date();
-    const startTime = new Date(session.startedAt).getTime();
-    const relativeTimeSec = parseFloat(((now.getTime() - startTime) / 1000).toFixed(1));
-
-    const entry: SessionLogEntry = {
-      action,
-      relativeTimeSec,
-      timestamp: now.toISOString(),
-    };
-    if (elementData) {
-      entry.element = elementData;
-    }
-
-    const logPath = path.join(session.sessionDir, SESSION_LOG_FILENAME);
-    const entries = loadSessionLog(session.sessionDir);
-    entries.push(entry);
-    fs.writeFileSync(logPath, JSON.stringify(entries, null, 2) + '\n');
-  }
+  const started = new Date();
+  let success = false;
+  let exitStatus = 0;
+  let capturedStderr = '';
+  let assertion: NonNullable<SessionLogEntry['assertion']> | undefined;
 
   // Build shell command with proper quoting
   const shellCmd = buildShellCommand(resolvedArgs, session?.sessionName);
 
   // Pass through to agent-browser
   try {
-    const result = execSync(shellCmd, {
+    let result: string;
+    if (args[0] === 'assert' && session) {
+      assertion = runAssertion(args, session);
+      result = assertion.message;
+    } else {
+      result = execSync(shellCmd, {
       encoding: 'utf-8',
       timeout: 60000,
       stdio: ['pipe', 'pipe', 'pipe'],
-    });
+      });
+    }
+    success = assertion ? assertion.passed : true;
+    if (assertion && !assertion.passed) {
+      exitStatus = 1;
+      process.exitCode = 1;
+    }
     if (result.trim()) {
       process.stdout.write(result);
       // Ensure trailing newline
@@ -281,15 +349,42 @@ export async function execCommand(args: string[]): Promise<void> {
   } catch (error: any) {
     // Print stderr and exit with the same code
     const stderr = error?.stderr?.toString?.() || '';
+    capturedStderr = redactStderr(stderr || error?.message || 'Unknown error');
+    exitStatus = error?.status || 1;
     const stdout = error?.stdout?.toString?.() || '';
     if (stdout) process.stdout.write(stdout);
     if (stderr) process.stderr.write(stderr);
     const hint = describeSelectorSyntaxError(args, stderr);
     if (hint) process.stderr.write(hint);
-    process.exitCode = error?.status || 1;
-    return;
+    process.exitCode = exitStatus;
   } finally {
     materialized.cleanup();
+    if (session) {
+      const finished = new Date();
+      const entry: SessionLogEntry = {
+        action,
+        timestamp: started.toISOString(),
+        startedAt: started.toISOString(),
+        finishedAt: finished.toISOString(),
+        relativeTimeSec: parseFloat(((started.getTime() - new Date(session.startedAt).getTime()) / 1000).toFixed(1)),
+        exitStatus,
+        success,
+        ...(capturedStderr ? { stderr: capturedStderr } : {}),
+        ...(elementData ? { element: elementData } : {}),
+        ...(assertion ? { assertion } : {}),
+      };
+      try { entry.resultingUrl = readPageUrl(session.sessionName); } catch { /* browser unavailable */ }
+      if (args[0] === 'screenshot') {
+        const screenshotPath = resolvedArgs.find((arg) => arg.endsWith('.png'));
+        const dimensions = screenshotPath ? pngDimensions(screenshotPath) : undefined;
+        if (screenshotPath && dimensions) entry.screenshot = { path: screenshotPath, ...dimensions };
+      }
+      appendLog(session.sessionDir, entry);
+      if (assertion) {
+        const assertions = loadSessionLog(session.sessionDir).filter((item) => item.assertion).map((item) => item.assertion);
+        writeJsonAtomic(path.join(session.sessionDir, RESULT_FILENAME), { assertions, passed: assertions.every((item) => item?.passed) });
+      }
+    }
   }
 
   // If the action was `set viewport`, update cached viewport in session state
@@ -299,25 +394,25 @@ export async function execCommand(args: string[]): Promise<void> {
       const vpJson = ab("eval 'JSON.stringify({width: window.innerWidth, height: window.innerHeight})'", {
         session: session.sessionName,
       });
-      const vp = JSON.parse(vpJson);
-      session.viewport = { width: vp.width, height: vp.height };
-      actualViewport = session.viewport;
+      const vp = parseBrowserValue(vpJson) as { width?: unknown; height?: unknown };
+      if (!vp || typeof vp.width !== 'number' || typeof vp.height !== 'number' || !Number.isInteger(vp.width) || !Number.isInteger(vp.height)) throw new Error('invalid viewport response');
+      const verifiedViewport = { width: vp.width, height: vp.height };
+      session.viewport = verifiedViewport;
+      session.viewportChanges.push({ ...verifiedViewport, timestamp: new Date().toISOString() });
+      actualViewport = verifiedViewport;
       saveSession(session);
     } catch {
       // Non-critical — viewport cache stays stale
     }
     const requestedWidth = Number(args[2]);
     const requestedHeight = Number(args[3]);
-    if (
-      actualViewport &&
-      (actualViewport.width !== requestedWidth || actualViewport.height !== requestedHeight)
-    ) {
+    if (!actualViewport || actualViewport.width !== requestedWidth || actualViewport.height !== requestedHeight) {
       console.error(
         `Error: agent-browser reported success but the viewport remained ` +
-          `${actualViewport.width}x${actualViewport.height}; requested ` +
+          `${actualViewport?.width ?? 'undefined'}x${actualViewport?.height ?? 'undefined'}; requested ` +
           `${requestedWidth}x${requestedHeight}.`,
       );
-      process.exit(1);
+      process.exitCode = 1;
     }
   }
 }

@@ -161,7 +161,7 @@ function filterTools(
 // ---------------------------------------------------------------------------
 
 function getSkillContent(tool: ToolDefinition): string {
-  return readBundledSkill(tool.bundledSkill) ?? getInlineSkillContent(tool.inlineAgent);
+  return getInlineSkillContent(tool.inlineAgent);
 }
 
 // ---------------------------------------------------------------------------
@@ -190,6 +190,13 @@ function installFile(
         message: 'Already up to date',
       };
     }
+    return {
+      tool: tool.name,
+      displayName: tool.displayName,
+      status: 'failed',
+      path: targetPath,
+      message: 'Installed skill differs from the bundled workflow; use --force to replace it',
+    };
   }
 
   fs.writeFileSync(targetPath, content);
@@ -219,6 +226,16 @@ function installAppend(
         `${escapeRegex(MARKER_START)}[\\s\\S]*?${escapeRegex(MARKER_END)}`,
       );
       const updated = existing.replace(regex, markedContent);
+
+      if (updated !== existing && !force) {
+        return {
+          tool: tool.name,
+          displayName: tool.displayName,
+          status: 'failed',
+          path: targetPath,
+          message: 'Installed rules differ from the bundled workflow; use --force to replace them',
+        };
+      }
 
       if (updated === existing && !force) {
         return {
@@ -463,6 +480,7 @@ export async function installCommand(options: InstallOptions): Promise<void> {
 
   if (failed > 0) {
     console.log(chalk.yellow(`Done. ${installed} installed, ${failed} failed.`));
+    process.exitCode = 1;
   } else if (installed > 0) {
     console.log(chalk.green(`Done! ProofShot skills installed for ${installed} tool(s).`));
     console.log('');

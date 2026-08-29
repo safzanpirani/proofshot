@@ -7,6 +7,7 @@ import {
   getShellExecutable,
   parseWindowsNetstatOutput,
   readCommandVersion,
+  processIdentityMatches,
 } from './process.js';
 
 describe('getShellExecutable', () => {
@@ -22,6 +23,15 @@ describe('getShellExecutable', () => {
 
   it('falls back to /bin/sh on Unix when SHELL is missing', () => {
     expect(getShellExecutable('linux', {})).toBe('/bin/sh');
+  });
+});
+
+describe('process ownership', () => {
+  it('requires PID, start time, command identity, and ownership token', () => {
+    const expected = { pid: 42, startTime: 'Sat Aug 30 12:00:00 2026', command: 'ignored', ownershipToken: 'owner-123' };
+    expect(processIdentityMatches({ pid: 42, startTime: expected.startTime, command: 'node log-pump.js --proofshot-owner=owner-123' }, expected)).toBe(true);
+    expect(processIdentityMatches({ pid: 42, startTime: 'later', command: 'node log-pump.js --proofshot-owner=owner-123' }, expected)).toBe(false);
+    expect(processIdentityMatches({ pid: 42, startTime: expected.startTime, command: 'node unrelated.js owner-123' }, expected)).toBe(false);
   });
 });
 

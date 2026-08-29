@@ -5,6 +5,7 @@ import { Transform } from 'stream';
 import { isPortOpen, waitForPort } from '../utils/port.js';
 import {
   findPidsListeningOnPort,
+  getProcessIdentity,
   killPids,
   spawnShellCommand,
   terminateProcessTree,
@@ -15,6 +16,7 @@ export interface ServerStartResult {
   port: number;
   /** PID of the detached log pump owning the dev server, or null if we didn't start one. */
   pumpPid: number | null;
+  processIdentity: { pid: number; startTime: string; command: string; ownershipToken: string } | null;
 }
 
 /**
@@ -22,18 +24,27 @@ export interface ServerStartResult {
  * Retries up to 3 times to ensure the port is actually freed.
  * Returns true if something was killed.
  */
-async function killPort(port: number): Promise<boolean> {
+async function takePort(port: number): Promise<boolean> {
   let killed = false;
   for (let attempt = 0; attempt < 3; attempt++) {
     const pids = findPidsListeningOnPort(port);
     if (pids.length > 0) {
-      killed = killPids(pids) || killed;
+      for (const pid of pids) {
+        const identity = getProcessIdentity(pid);
+        if (!identity) continue;
+        try {
+          process.kill(pid, 'SIGTERM');
+          killed = true;
+        } catch { /* process exited */ }
+      }
     }
 
     // Wait for the OS to release the port
     await new Promise((r) => setTimeout(r, 1000));
     if (!(await isPortOpen(port))) return killed;
   }
+  const remaining = findPidsListeningOnPort(port);
+  if (remaining.length > 0) killed = killPids(remaining) || killed;
   return killed;
 }
 
@@ -70,11 +81,15 @@ export async function ensureDevServer(
   port: number,
   startupTimeout: number,
   logPath: string,
+  options: { takePort?: boolean; ownershipToken: string },
 ): Promise<ServerStartResult> {
-  // If port is occupied, kill the existing process — the user explicitly
-  // asked proofshot to own the server via --run.
   if (await isPortOpen(port)) {
-    const killed = await killPort(port);
+    const owners = findPidsListeningOnPort(port).map((pid) => getProcessIdentity(pid)).filter(Boolean);
+    const ownerText = owners.map((owner) => `PID ${owner!.pid}: ${owner!.command}`).join('\n') || 'owner unavailable';
+    if (!options.takePort) {
+      throw new Error(`Port ${port} is already in use.\n${ownerText}\nRetry with --take-port to authorize takeover.`);
+    }
+    const killed = await takePort(port);
     if (killed) {
       process.stderr.write(`Port ${port} was in use — killed existing process\n`);
     }
@@ -103,7 +118,7 @@ export async function ensureDevServer(
         'Reinstall proofshot or run "npm run build".',
     );
   }
-  const proc = spawn(process.execPath, [pumpScript, logPath, command], {
+  const proc = spawn(process.execPath, [pumpScript, `--proofshot-owner=${options.ownershipToken}`, logPath, command], {
     cwd: process.cwd(),
     stdio: 'ignore',
     detached: true,
@@ -130,5 +145,15 @@ export async function ensureDevServer(
   // Small delay for stability
   await new Promise((resolve) => setTimeout(resolve, 1000));
 
-  return { alreadyRunning: false, port, pumpPid: proc.pid ?? null };
+  const identity = proc.pid ? getProcessIdentity(proc.pid) : null;
+  if (!identity) {
+    if (proc.pid) terminateProcessTree(proc.pid);
+    throw new Error('Started the dev server pump but could not verify its process identity');
+  }
+  return {
+    alreadyRunning: false,
+    port,
+    pumpPid: proc.pid ?? null,
+    processIdentity: { ...identity, ownershipToken: options.ownershipToken },
+  };
 }

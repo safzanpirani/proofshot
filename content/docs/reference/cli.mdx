@@ -48,6 +48,8 @@ proofshot start [options]
 | `--description <text>` | Description of what you're verifying (appears in reports) | — |
 | `--headed` | Show the browser window (visible Chromium) | `false` |
 | `--output <dir>` | Custom output directory for artifacts | `./proofshot-artifacts` |
+| `--take-port` | Authorize graceful takeover of an occupied port | `false` |
+| `--force` | Clear a session only after lifecycle checks prove its resources stale | `false` |
 
 **Examples:**
 
@@ -79,6 +81,7 @@ proofshot stop [options]
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--no-close` | Keep the browser open after stopping | `false` |
+| `--allow-incomplete` | Return success when evidence collection is unavailable | `false` |
 
 **What happens:**
 1. Collects console errors and output from the browser
@@ -109,10 +112,12 @@ proofshot exec scroll down
 proofshot exec press Enter
 ```
 
-Every `exec` call appends an entry to `session-log.json` with:
+Every `exec` call appends an outcome to `session-log.jsonl` with:
 - Relative timestamp from session start
 - The command and arguments
+- Start and finish timestamps, exit status, success, redacted stderr, and resulting URL
 - Element bounding box and label (for `click`, `fill`, `type` targeting `@eN` refs)
+- Screenshot dimensions and assertion results when applicable
 
 This data powers the interactive viewer's timeline and overlays.
 
@@ -123,17 +128,19 @@ This data powers the interactive viewer's timeline and overlays.
 Compare current screenshots against a baseline for visual regression testing.
 
 ```sh
-proofshot diff --baseline <path>
+proofshot diff --baseline <session> --current <session> [--threshold <percent>]
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--baseline <path>` | Path to the baseline session folder |
+| `--current <path>` | Path to the current session folder |
+| `--threshold <percent>` | Allowed mismatch before a nonzero exit |
 
 **Example:**
 
 ```sh
-proofshot diff --baseline ./proofshot-artifacts/2025-01-15_10-30-00_main/
+proofshot diff --baseline ./baseline-session --current ./current-session --threshold 0.1
 ```
 
 Compares screenshots by filename. Outputs diff images highlighting pixel changes.
@@ -154,6 +161,11 @@ proofshot pr [number] [options]
 | `--dry-run` | Print the markdown comment without posting |
 | `--upload-provider <provider>` | Upload backend: `repo-contents` (default) or `github-web-attachments` |
 | `--artifacts-branch <branch>` | Git branch used by the `repo-contents` provider. Default: `proofshot-artifacts` |
+| `--session <path>` | Upload one exact session |
+| `--sha <revision>` | Require the recorded revision. Default: `HEAD` |
+| `--all-sessions` | Upload all matching sessions |
+| `--allow-stale` | Allow a revision mismatch |
+| `--allow-dirty` | Allow dirty current or recorded worktrees |
 
 **Examples:**
 
@@ -181,10 +193,10 @@ proofshot pr --upload-provider github-web-attachments
 
 ## `proofshot clean`
 
-Remove the entire artifacts directory.
+Remove artifacts after path validation.
 
 ```sh
-proofshot clean
+proofshot clean [--dry-run] [--older-than 7d] [--trash]
 ```
 
-Deletes `./proofshot-artifacts/` (or the configured output directory). No flags.
+ProofShot refuses filesystem roots, the home directory, the repository root, and broad ancestors.

@@ -5,9 +5,9 @@ Visual verification tool for AI coding agents. Records browser sessions, capture
 ## Quick reference
 
 ```bash
-npm run build          # Build with tsup (must run after changes)
-npm test               # Run vitest once
-npm run dev            # Watch mode build
+pnpm build             # Build with tsup (must run after changes)
+pnpm test              # Run vitest once
+pnpm dev               # Watch mode build
 ```
 
 ## Architecture
@@ -29,7 +29,7 @@ src/
 ## Key conventions
 
 - **ESM only** — all imports MUST use `.js` extensions: `import { foo } from '../utils/config.js'`
-- **Build before test** — CLI runs from `dist/`, always `npm run build` after code changes
+- **Build before test** — CLI runs from `dist/`, always run `pnpm build` after code changes
 - **agent-browser** — external peer dependency (Rust CLI + Node daemon). All browser commands go through `ab()` in `utils/exec.ts` which calls `agent-browser <command>` via `execSync`
 - **Session state** — `start` writes `.session.json`, `exec` and `stop` read it. `stop` clears it. Don't assume session exists without checking
 - **Session metadata** — `start` writes `metadata.json` inside each session folder with git branch/commit. This persists after `stop` and is used by `pr` to match sessions to branches

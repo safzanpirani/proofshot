@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { writeJsonAtomic } from '../utils/atomic.js';
 
 const METADATA_FILENAME = 'metadata.json';
 
@@ -8,6 +9,11 @@ export interface SessionMetadata {
   commitSha: string;
   startedAt: string;
   description: string | null;
+  dirty: boolean;
+  changedFiles: string[];
+  diffHash: string | null;
+  proofshotBuildSha: string | null;
+  scenarioManifest: string | null;
 }
 
 /**
@@ -16,7 +22,7 @@ export interface SessionMetadata {
  */
 export function writeMetadata(sessionDir: string, metadata: SessionMetadata): void {
   const metadataPath = path.join(sessionDir, METADATA_FILENAME);
-  fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2) + '\n');
+  writeJsonAtomic(metadataPath, metadata);
 }
 
 /**

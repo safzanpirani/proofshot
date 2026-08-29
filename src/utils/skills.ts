@@ -26,6 +26,12 @@ export function readBundledSkill(relativePath: string): string | null {
  * Generate inline skill content as a fallback when bundled files aren't available.
  */
 export function getInlineSkillContent(agent: string): string {
+  const canonical = readBundledSkill('workflow.md');
+  if (canonical) {
+    if (agent === 'cursor') return `---\ndescription: Visual verification of UI changes using ProofShot\nglobs: ["**/*.tsx", "**/*.jsx", "**/*.vue", "**/*.svelte", "**/*.html"]\n---\n\n${canonical}`;
+    if (agent === 'claude' || agent === 'codex') return `---\nname: proofshot\ndescription: Visual verification of UI features after visible interface changes.\n---\n\n${canonical}`;
+    return canonical;
+  }
   if (agent === 'claude' || agent === 'codex') {
     return `---
 name: proofshot
@@ -151,4 +157,8 @@ Key proofshot exec commands:
 Artifacts saved to ./proofshot-artifacts/ including video, screenshots, errors, and summary.
 Use \`proofshot start --output /path\` when the project volume is low on space.
 `;
+}
+
+export function getCanonicalSkillContent(agent: string): string {
+  return getInlineSkillContent(agent);
 }

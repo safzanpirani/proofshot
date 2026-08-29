@@ -96,6 +96,86 @@ export function killPids(
   }
 }
 
+export interface ProcessIdentity {
+  pid: number;
+  startTime: string;
+  command: string;
+}
+
+export function getProcessIdentity(
+  pid: number,
+  platform = process.platform,
+  execFn: ExecSyncLike = execSync,
+): ProcessIdentity | null {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    if (platform === 'win32') {
+      const output = execFn(
+        `powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}' | Select-Object -First 1 CreationDate,CommandLine | ConvertTo-Json -Compress"`,
+        { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
+      ) as string;
+      const parsed = JSON.parse(output) as { CreationDate?: string; CommandLine?: string };
+      if (!parsed.CreationDate) return null;
+      return { pid, startTime: parsed.CreationDate, command: parsed.CommandLine || '' };
+    }
+    const output = (execFn(`ps -o lstart= -o command= -p ${pid}`, {
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }) as string).trim();
+    if (!output) return null;
+    return { pid, startTime: output.slice(0, 24).trim(), command: output.slice(24).trim() };
+  } catch {
+    return null;
+  }
+}
+
+export function processIdentityMatches(
+  actual: ProcessIdentity | null,
+  expected: ProcessIdentity & { ownershipToken: string },
+): boolean {
+  return Boolean(
+    actual &&
+    actual.pid === expected.pid &&
+    actual.startTime === expected.startTime &&
+    actual.command.includes('log-pump') &&
+    actual.command.includes(expected.ownershipToken),
+  );
+}
+
+export async function terminateOwnedProcessTree(
+  expected: ProcessIdentity & { ownershipToken: string },
+  platform = process.platform,
+  execFn: ExecSyncLike = execSync,
+  killFn: (pid: number, signal: NodeJS.Signals | 0) => void = (pid, signal) => process.kill(pid, signal),
+  graceMs = 5000,
+): Promise<void> {
+  const actual = getProcessIdentity(expected.pid, platform, execFn);
+  if (!actual) {
+    try { killFn(expected.pid, 0); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return;
+      throw error;
+    }
+  }
+  if (!processIdentityMatches(actual, expected)) {
+    throw new Error(`Refusing to stop PID ${expected.pid}: process identity or ownership token does not match session state`);
+  }
+  if (platform === 'win32') {
+    try { execFn(`taskkill /T /PID ${expected.pid}`, { stdio: 'pipe' }); } catch { /* verify below */ }
+  } else {
+    killFn(-expected.pid, 'SIGTERM');
+  }
+  const deadline = Date.now() + graceMs;
+  while (Date.now() < deadline) {
+    try { killFn(expected.pid, 0); } catch { return; }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (platform === 'win32') {
+    execFn(`taskkill /F /T /PID ${expected.pid}`, { stdio: 'pipe' });
+  } else {
+    killFn(-expected.pid, 'SIGKILL');
+  }
+}
+
 export function terminateProcessTree(
   pid: number,
   platform = process.platform,

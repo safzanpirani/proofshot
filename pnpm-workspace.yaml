@@ -1,0 +1,5 @@
+autoInstallPeers: false
+virtualStoreType: global
+
+allowBuilds:
+  esbuild: false

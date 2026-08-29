@@ -10,16 +10,16 @@
  * which hung every agent-driven session. The pump owns the pipes instead, and
  * `start` detaches from it.
  *
- * Usage: log-pump <logPath> <command...>
+ * Usage: log-pump --proofshot-owner=<token> <logPath> <command...>
  */
 import { spawn } from 'child_process';
 import * as fs from 'fs';
 import { getShellExecutable, terminateProcessTree } from '../src/utils/process.js';
 
-const [, , logPath, ...commandParts] = process.argv;
+const [, , ownerArgument, logPath, ...commandParts] = process.argv;
 
-if (!logPath || commandParts.length === 0) {
-  console.error('usage: log-pump <logPath> <command...>');
+if (!ownerArgument?.startsWith('--proofshot-owner=') || !logPath || commandParts.length === 0) {
+  console.error('usage: log-pump --proofshot-owner=<token> <logPath> <command...>');
   process.exit(2);
 }
 

@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { startCommand } from './start.js';
+import { hashWorkingTreeDiff, parseChangedFiles, startCommand } from './start.js';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 
 const mocks = vi.hoisted(() => ({
   loadConfig: vi.fn(),
@@ -143,5 +146,20 @@ describe('startCommand', () => {
       expect.stringContaining('proofshot-artifacts'),
       '/tmp/proofshot-low-space',
     );
+  });
+});
+
+describe('git provenance', () => {
+  it('preserves the first filename when porcelain status starts with a space', () => {
+    expect(parseChangedFiles(' M README.md\n?? new-file.txt\n')).toEqual(['README.md', 'new-file.txt']);
+  });
+
+  it('includes untracked file contents in the diff hash', () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'proofshot-provenance-'));
+    fs.writeFileSync(path.join(directory, 'new-file.txt'), 'first');
+    const first = hashWorkingTreeDiff(Buffer.from('tracked'), ['new-file.txt'], directory);
+    fs.writeFileSync(path.join(directory, 'new-file.txt'), 'second');
+    const second = hashWorkingTreeDiff(Buffer.from('tracked'), ['new-file.txt'], directory);
+    expect(second).not.toBe(first);
   });
 });

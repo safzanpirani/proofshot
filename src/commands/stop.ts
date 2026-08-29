@@ -1,17 +1,18 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { execSync } from 'child_process';
+import { execFileSync, execSync } from 'child_process';
 import chalk from 'chalk';
 import { loadConfig } from '../utils/config.js';
 import { setAgentBrowserDefaults } from '../utils/exec.js';
 import { closeBrowser, getConsoleErrors, getConsoleOutput, getConsoleOutputJson } from '../browser/session.js';
 import { stopRecording } from '../browser/capture.js';
-import { loadSession, clearSession } from '../session/state.js';
-import { terminateProcessTree } from '../utils/process.js';
+import { loadSession, clearSession, saveSession } from '../session/state.js';
+import { terminateOwnedProcessTree } from '../utils/process.js';
 import { writeViewer, type TimestampedLogEntry } from '../artifacts/viewer.js';
 import { extractServerErrors } from '../utils/error-patterns.js';
 import { loadSessionLog } from './exec.js';
 import { estimateTokenUsage, formatTokenUsage, type TokenUsage } from '../utils/token-usage.js';
+import { writeJsonAtomic } from '../utils/atomic.js';
 
 /**
  * Parse server.log lines with "epochMs\ttext" format.
@@ -50,8 +51,11 @@ function parseTimestampedServerLog(
   return { entries, cleanText: cleanLines.join('\n') };
 }
 
-interface StopOptions {
+export interface StopOptions {
   noClose?: boolean;
+  allowIncomplete?: boolean;
+  failOnConsoleErrors?: boolean;
+  failOnServerErrors?: boolean;
 }
 
 export async function stopCommand(options: StopOptions): Promise<void> {
@@ -79,6 +83,8 @@ export async function stopCommand(options: StopOptions): Promise<void> {
   let consoleErrors = '';
   let consoleOutput = '';
   let consoleEntries: TimestampedLogEntry[] = [];
+  let consoleStatus: 'captured' | 'unavailable' | 'browser-disconnected' = 'captured';
+  const incompleteReasons: string[] = [];
   try {
     consoleErrors = getConsoleErrors(session.sessionName);
     consoleOutput = getConsoleOutput(session.sessionName);
@@ -88,8 +94,11 @@ export async function stopCommand(options: StopOptions): Promise<void> {
       text: `[${msg.type}] ${msg.text}`,
       relativeTimeSec: Math.max(0, parseFloat(((msg.timestamp - startTime) / 1000).toFixed(1))),
     }));
-  } catch {
-    // Browser may already be closed
+  } catch (error) {
+    consoleStatus = /disconnect|closed|browser/i.test(error instanceof Error ? error.message : String(error))
+      ? 'browser-disconnected'
+      : 'unavailable';
+    incompleteReasons.push(`Console collection ${consoleStatus}: ${error instanceof Error ? error.message : error}`);
   }
 
   // Write console output to file (before closing browser)
@@ -99,7 +108,12 @@ export async function stopCommand(options: StopOptions): Promise<void> {
 
   // Step 2: Stop recording
   console.log(chalk.dim('Stopping recording...'));
-  stopRecording(session.sessionName);
+  try {
+    stopRecording(session.sessionName);
+    session.recordingActive = false;
+  } catch (error) {
+    incompleteReasons.push(`Recording stop failed: ${error instanceof Error ? error.message : error}`);
+  }
 
   // Step 3: Close browser (unless --no-close)
   if (!options.noClose) {
@@ -116,6 +130,10 @@ export async function stopCommand(options: StopOptions): Promise<void> {
     serverLog = parsed.cleanText;
     serverEntries = parsed.entries;
   }
+  const serverStatus: 'captured' | 'unavailable-without-run' | 'unavailable' = session.serverCommand
+    ? (fs.existsSync(session.serverErrorLog) ? 'captured' : 'unavailable')
+    : 'unavailable-without-run';
+  if (serverStatus === 'unavailable') incompleteReasons.push('Server log collection failed because server.log is missing');
 
   // Use session subfolder for all artifacts
   const sessionDir = session.sessionDir;
@@ -128,9 +146,13 @@ export async function stopCommand(options: StopOptions): Promise<void> {
   // Step 5.5: Trim video dead time
   const sessionLog = loadSessionLog(sessionDir);
   let trimOffsetSec = 0;
-  if (fs.existsSync(session.videoPath)) {
+  let videoStatus = validateVideo(session.videoPath);
+  if (videoStatus.available) {
     trimOffsetSec = trimVideo(session.videoPath, screenshots, sessionDir, startTime, sessionLog);
+    videoStatus = validateVideo(session.videoPath);
+    if (!videoStatus.available) incompleteReasons.push(videoStatus.reason);
   } else if (session.recordingActive) {
+    incompleteReasons.push(videoStatus.reason);
     console.log(
       chalk.yellow('⚠') +
         ' Recording was active but no video file was produced.\n' +
@@ -157,11 +179,31 @@ export async function stopCommand(options: StopOptions): Promise<void> {
   const serverErrorCount = serverErrorLines.length;
 
   // Step 6.5: Estimate token usage
-  const tokenUsage = estimateTokenUsage(session.sessionDir, startTime, Date.now());
+  const tokenUsage = null;
+
+  const resultPath = path.join(sessionDir, 'result.json');
+  let assertionFailures = 0;
+  let recordedAssertions: Array<{ passed?: boolean }> = [];
+  if (fs.existsSync(resultPath)) {
+    try {
+      const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as { assertions?: Array<{ passed?: boolean }> };
+      recordedAssertions = result.assertions || [];
+      assertionFailures = recordedAssertions.filter((assertion) => !assertion.passed).length;
+    } catch (error) {
+      incompleteReasons.push(`Assertion results unavailable: ${error instanceof Error ? error.message : error}`);
+    }
+  }
+  writeJsonAtomic(path.join(sessionDir, 'manifest.json'), {
+    schemaVersion: 1,
+    session: path.basename(sessionDir),
+    screenshots,
+    assertionsFile: fs.existsSync(resultPath) ? 'result.json' : null,
+    metadataFile: 'metadata.json',
+  });
 
   // Step 7: Generate SUMMARY.md
   const summaryPath = path.join(sessionDir, 'SUMMARY.md');
-  const summary = generateProofSummary({
+  const summaryData: SummaryData = {
     description: session.description,
     serverCommand: session.serverCommand,
     port: session.port,
@@ -174,8 +216,14 @@ export async function stopCommand(options: StopOptions): Promise<void> {
     tokenUsage,
     durationSec,
     outputDir: sessionDir,
-  });
-  fs.writeFileSync(summaryPath, summary);
+    consoleStatus,
+    serverStatus,
+    videoStatus: videoStatus.available ? 'captured' : 'unavailable',
+    environment: session,
+    assertionFailures,
+    incompleteReasons,
+  };
+  fs.writeFileSync(summaryPath, generateProofSummary(summaryData));
 
   // Step 7.5: Generate interactive viewer (if session log exists)
   // Adjust session log timestamps to match the trimmed video
@@ -186,12 +234,6 @@ export async function stopCommand(options: StopOptions): Promise<void> {
           relativeTimeSec: parseFloat((e.relativeTimeSec - trimOffsetSec).toFixed(1)),
         }))
       : sessionLog;
-
-  // Write adjusted log back to disk so timestamps match the trimmed video
-  if (trimOffsetSec > 0 && viewerEntries.length > 0) {
-    const logPath = path.join(sessionDir, 'session-log.json');
-    fs.writeFileSync(logPath, JSON.stringify(viewerEntries, null, 2) + '\n');
-  }
 
   // Apply trimOffsetSec to log entries (same adjustment as session log)
   const adjustTime = (e: TimestampedLogEntry): TimestampedLogEntry =>
@@ -206,7 +248,7 @@ export async function stopCommand(options: StopOptions): Promise<void> {
     description: session.description,
     serverCommand: session.serverCommand,
     durationSec,
-    videoFilename: fs.existsSync(session.videoPath) ? path.basename(session.videoPath) : null,
+    videoFilename: videoStatus.available ? path.basename(session.videoPath) : null,
     consoleErrorCount,
     serverErrorCount,
     consoleOutput,
@@ -221,23 +263,39 @@ export async function stopCommand(options: StopOptions): Promise<void> {
   // Shut down the dev server proofshot started. Previously the process tree was
   // only killed when startup failed, so every completed session leaked a server
   // holding the port -- the next run then had to kill it to get the port back.
-  if (session.serverPumpPid) {
+  let serverCleanupSafe = true;
+  if (session.serverProcess) {
     try {
-      terminateProcessTree(session.serverPumpPid);
+      await terminateOwnedProcessTree(session.serverProcess);
       console.log(chalk.dim('Dev server stopped'));
-    } catch {
-      // Already gone.
+    } catch (error) {
+      serverCleanupSafe = false;
+      incompleteReasons.push(`Dev server cleanup refused: ${error instanceof Error ? error.message : error}`);
     }
   }
 
-  clearSession(outputDir);
+  if (serverCleanupSafe) clearSession(outputDir);
+  else saveSession(session);
+  fs.writeFileSync(summaryPath, generateProofSummary(summaryData));
+  writeJsonAtomic(resultPath, {
+    assertions: recordedAssertions,
+    assertionsPassed: assertionFailures === 0,
+    evidenceComplete: incompleteReasons.length === 0,
+    console: { status: consoleStatus, errorCount: consoleErrorCount },
+    server: { status: serverStatus, errorCount: serverErrorCount },
+    video: { status: videoStatus.available ? 'captured' : 'unavailable', reason: videoStatus.reason || null },
+    incompleteReasons,
+  });
 
   // Step 9: Print results
   console.log('');
-  console.log(chalk.green.bold('✅ ProofShot verification complete'));
+  const failed = incompleteReasons.length > 0 || assertionFailures > 0 ||
+    Boolean(options.failOnConsoleErrors && consoleErrorCount > 0) ||
+    Boolean(options.failOnServerErrors && serverErrorCount > 0);
+  console.log((failed ? chalk.red.bold('✗ ProofShot verification incomplete') : chalk.green.bold('✅ ProofShot verification complete')));
   console.log('');
 
-  if (fs.existsSync(session.videoPath)) {
+  if (videoStatus.available) {
     console.log(`📹 Video:         ${chalk.dim(session.videoPath)} (${durationSec}s)`);
   }
   console.log(`📸 Screenshots:   ${screenshots.length} captured`);
@@ -255,6 +313,7 @@ export async function stopCommand(options: StopOptions): Promise<void> {
     `Server errors:    ${serverErrorCount === 0 ? chalk.green('0') : chalk.red(String(serverErrorCount))}`,
   );
   console.log(`Duration:         ${durationSec} seconds`);
+  console.log(`Evidence:         ${failed ? chalk.red('incomplete') : chalk.green('complete')}`);
   console.log('');
   console.log(`Proof artifacts saved to ${chalk.dim(sessionDir)}`);
 
@@ -280,6 +339,12 @@ export async function stopCommand(options: StopOptions): Promise<void> {
       console.log(chalk.dim(`  ... and ${serverErrorLines.length - 10} more (see SUMMARY.md)`));
     }
   }
+  if (incompleteReasons.length > 0) {
+    console.log('');
+    console.log(chalk.red.bold('Unavailable evidence:'));
+    for (const reason of incompleteReasons) console.log(chalk.red(`  ${reason}`));
+  }
+  if (failed && !options.allowIncomplete) process.exitCode = 1;
 }
 
 interface SummaryData {
@@ -295,6 +360,12 @@ interface SummaryData {
   tokenUsage?: TokenUsage | null;
   durationSec: number;
   outputDir: string;
+  consoleStatus: 'captured' | 'unavailable' | 'browser-disconnected';
+  serverStatus: 'captured' | 'unavailable-without-run' | 'unavailable';
+  videoStatus: 'captured' | 'unavailable';
+  environment: import('../session/state.js').SessionState;
+  assertionFailures: number;
+  incompleteReasons: string[];
 }
 
 function generateProofSummary(data: SummaryData): string {
@@ -319,11 +390,7 @@ ${data.description}
 
   // Video
   const relativeVideo = path.basename(data.videoPath);
-  md += `## Video Recording
-
-Full session recording: [${relativeVideo}](./${relativeVideo}) (${data.durationSec}s)
-
-`;
+  md += `## Video Recording\n\n${data.videoStatus === 'captured' ? `Full session recording: [${relativeVideo}](./${relativeVideo}) (${data.durationSec}s)` : 'Video capture unavailable.'}\n\n`;
 
   // Screenshots
   if (data.screenshots.length > 0) {
@@ -339,7 +406,9 @@ Full session recording: [${relativeVideo}](./${relativeVideo}) (${data.durationS
   md += `## Console Errors
 
 `;
-  if (data.consoleErrorCount === 0) {
+  if (data.consoleStatus !== 'captured') {
+    md += `Console collection ${data.consoleStatus}.\n\n`;
+  } else if (data.consoleErrorCount === 0) {
     md += `No console errors detected.\n\n`;
   } else {
     md += `${data.consoleErrorCount} error(s) detected:\n\n\`\`\`\n${data.consoleErrors}\n\`\`\`\n\n`;
@@ -349,7 +418,11 @@ Full session recording: [${relativeVideo}](./${relativeVideo}) (${data.durationS
   md += `## Server Errors
 
 `;
-  if (data.serverErrorCount === 0) {
+  if (data.serverStatus === 'unavailable-without-run') {
+    md += `Server logs unavailable because --run was omitted.\n\n`;
+  } else if (data.serverStatus === 'unavailable') {
+    md += `Server log collection unavailable.\n\n`;
+  } else if (data.serverErrorCount === 0) {
     md += `No server errors detected.\n\n`;
   } else {
     md += `${data.serverErrorCount} error(s) detected:\n\n\`\`\`\n${data.serverLog.slice(0, 5000)}\n\`\`\`\n\n`;
@@ -364,14 +437,39 @@ Full session recording: [${relativeVideo}](./${relativeVideo}) (${data.durationS
     md += '\n';
   }
 
-  // Environment
+  md += `## Assertions\n\n${data.assertionFailures === 0 ? 'All recorded assertions passed.' : `${data.assertionFailures} required assertion(s) failed.`}\n\n`;
+
+  if (data.incompleteReasons.length > 0) {
+    md += `## Unavailable Evidence\n\n${data.incompleteReasons.map((reason) => `- ${reason}`).join('\n')}\n\n`;
+  }
+
   md += `## Environment
-- Browser: Chromium (headless)
-- Viewport: 1280x720
+- Browser mode: ${data.environment.headless ? 'headless' : 'headed'}
+- Browser: ${data.environment.browserVersion || 'unavailable'}
+- agent-browser: ${data.environment.agentBrowserVersion || 'unavailable'}
+- Initial viewport: ${data.environment.initialViewport.width}x${data.environment.initialViewport.height}
+- Final viewport: ${data.environment.viewport?.width || 'unavailable'}x${data.environment.viewport?.height || 'unavailable'}
+- Device scale factor: ${data.environment.deviceScaleFactor}
+- ProofShot commit: ${data.environment.proofshotCommit || 'unavailable'}
 - Duration: ${data.durationSec} seconds
 `;
 
   return md;
+}
+
+function validateVideo(videoPath: string): { available: boolean; reason: string } {
+  if (!fs.existsSync(videoPath)) return { available: false, reason: 'Video file was not produced' };
+  const size = fs.statSync(videoPath).size;
+  if (size === 0) return { available: false, reason: 'Video file is empty' };
+  try {
+    execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', videoPath], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 15000,
+    });
+    return { available: true, reason: '' };
+  } catch (error) {
+    return { available: false, reason: `Video integrity check failed: ${error instanceof Error ? error.message : error}` };
+  }
 }
 
 /**

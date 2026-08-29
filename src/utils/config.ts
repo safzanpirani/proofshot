@@ -42,6 +42,66 @@ const DEFAULT_CONFIG: ProofShotConfig = {
   },
 };
 
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function positiveInteger(value: unknown, field: string, max = Number.MAX_SAFE_INTEGER): number {
+  if (!Number.isInteger(value) || Number(value) < 1 || Number(value) > max) {
+    throw new Error(`${field} must be an integer from 1 to ${max}`);
+  }
+  return Number(value);
+}
+
+export function validateConfig(value: unknown, source = CONFIG_FILENAME): ProofShotConfig {
+  if (!isObject(value)) throw new Error(`${source}: configuration must be a JSON object`);
+  const devServer = value.devServer === undefined ? {} : value.devServer;
+  const viewport = value.viewport === undefined ? {} : value.viewport;
+  const browser = value.browser === undefined ? {} : value.browser;
+  if (!isObject(devServer)) throw new Error(`${source}: devServer must be an object`);
+  if (!isObject(viewport)) throw new Error(`${source}: viewport must be an object`);
+  if (!isObject(browser)) throw new Error(`${source}: browser must be an object`);
+
+  const output = value.output ?? DEFAULT_CONFIG.output;
+  if (typeof output !== 'string' || !output.trim() || output.includes('\0')) {
+    throw new Error(`${source}: output must be a non-empty path`);
+  }
+  const defaultPages = value.defaultPages ?? DEFAULT_CONFIG.defaultPages;
+  if (!Array.isArray(defaultPages) || defaultPages.some((page) => typeof page !== 'string' || !page.trim())) {
+    throw new Error(`${source}: defaultPages must contain non-empty URL paths`);
+  }
+  for (const page of defaultPages as string[]) {
+    try { new URL(page, 'http://localhost'); } catch { throw new Error(`${source}: invalid URL in defaultPages: ${page}`); }
+  }
+  const headless = value.headless ?? DEFAULT_CONFIG.headless;
+  if (typeof headless !== 'boolean') throw new Error(`${source}: headless must be a boolean`);
+  const ignoreHttpsErrors = browser.ignoreHttpsErrors ?? DEFAULT_CONFIG.browser.ignoreHttpsErrors;
+  if (typeof ignoreHttpsErrors !== 'boolean') throw new Error(`${source}: browser.ignoreHttpsErrors must be a boolean`);
+  for (const key of ['configPath', 'executablePath'] as const) {
+    if (browser[key] !== undefined && (typeof browser[key] !== 'string' || !browser[key])) {
+      throw new Error(`${source}: browser.${key} must be a non-empty path`);
+    }
+  }
+  return {
+    devServer: {
+      port: positiveInteger(devServer.port ?? DEFAULT_CONFIG.devServer.port, `${source}: devServer.port`, 65535),
+      startupTimeout: positiveInteger(devServer.startupTimeout ?? DEFAULT_CONFIG.devServer.startupTimeout, `${source}: devServer.startupTimeout`),
+    },
+    output,
+    defaultPages: [...defaultPages] as string[],
+    viewport: {
+      width: positiveInteger(viewport.width ?? DEFAULT_CONFIG.viewport.width, `${source}: viewport.width`, 16384),
+      height: positiveInteger(viewport.height ?? DEFAULT_CONFIG.viewport.height, `${source}: viewport.height`, 16384),
+    },
+    headless,
+    browser: {
+      configPath: browser.configPath as string | undefined,
+      executablePath: browser.executablePath as string | undefined,
+      ignoreHttpsErrors,
+    },
+  };
+}
+
 /**
  * Find the config file by walking up from cwd.
  */
@@ -61,28 +121,24 @@ export function findConfigPath(startDir?: string): string | null {
  */
 export function loadConfig(startDir?: string): ProofShotConfig {
   const configPath = findConfigPath(startDir);
-  if (!configPath) return { ...DEFAULT_CONFIG };
+  if (!configPath) return validateConfig({});
 
   try {
     const raw = fs.readFileSync(configPath, 'utf-8');
-    const parsed = JSON.parse(raw);
+    const parsed = validateConfig(JSON.parse(raw), configPath);
     const configDir = path.dirname(configPath);
     const resolvedBrowser = {
-      ...DEFAULT_CONFIG.browser,
       ...parsed.browser,
     };
     if (resolvedBrowser.configPath) {
       resolvedBrowser.configPath = path.resolve(configDir, resolvedBrowser.configPath);
     }
     return {
-      ...DEFAULT_CONFIG,
       ...parsed,
-      devServer: { ...DEFAULT_CONFIG.devServer, ...parsed.devServer },
-      viewport: { ...DEFAULT_CONFIG.viewport, ...parsed.viewport },
       browser: resolvedBrowser,
     };
-  } catch {
-    return { ...DEFAULT_CONFIG };
+  } catch (error) {
+    throw new Error(`Failed to load ProofShot configuration ${configPath}: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 

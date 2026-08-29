@@ -56,5 +56,7 @@ describe('doctorCommand', () => {
     expect(output).toContain('ffmpeg');
     expect(output).toContain('1280x720');
     expect(output).toContain('proofshot-artifacts');
+    expect(output).toContain('✓ no active session');
+    expect(readCommandVersionMock).toHaveBeenCalledWith('ffmpeg', ['-version']);
   });
 });

@@ -1,11 +1,13 @@
 import * as path from 'path';
+import * as fs from 'fs';
+import { createHash, randomUUID } from 'crypto';
 import chalk from 'chalk';
 import { execSync } from 'child_process';
 import { loadConfig } from '../utils/config.js';
-import { setAgentBrowserDefaults } from '../utils/exec.js';
+import { ab, setAgentBrowserDefaults } from '../utils/exec.js';
 import { ensureDevServer } from '../server/start.js';
 import { closeBrowser, openBrowser } from '../browser/session.js';
-import { startRecording } from '../browser/capture.js';
+import { startRecording, stopRecording } from '../browser/capture.js';
 import { ensureOutputDir, generateTimestamp, generateSessionDirName } from '../artifacts/bundle.js';
 import {
   saveSession,
@@ -13,8 +15,11 @@ import {
   clearSession,
   generateAgentBrowserSessionName,
   writeSessionPointer,
+  loadSession,
 } from '../session/state.js';
 import { writeMetadata } from '../session/metadata.js';
+import { getProcessIdentity, processIdentityMatches, terminateOwnedProcessTree } from '../utils/process.js';
+import { PROOFSHOT_COMMIT } from '../version.js';
 
 interface StartOptions {
   description?: string;
@@ -24,6 +29,25 @@ interface StartOptions {
   output?: string;
   url?: string;
   force?: boolean;
+  takePort?: boolean;
+  scenarioManifest?: string;
+}
+
+export function parseChangedFiles(status: string): string[] {
+  const output = status.trimEnd();
+  return output ? output.split('\n').map((line) => line.slice(3).trim()).filter(Boolean) : [];
+}
+
+export function hashWorkingTreeDiff(trackedDiff: Buffer, untrackedFiles: string[], cwd = process.cwd()): string {
+  const hash = createHash('sha256').update(trackedDiff);
+  for (const file of [...untrackedFiles].sort()) {
+    const filePath = path.resolve(cwd, file);
+    const stat = fs.lstatSync(filePath);
+    hash.update('\0untracked\0').update(file).update('\0');
+    if (stat.isSymbolicLink()) hash.update(fs.readlinkSync(filePath));
+    else if (stat.isFile()) hash.update(fs.readFileSync(filePath));
+  }
+  return hash.digest('hex');
 }
 
 export async function startCommand(options: StartOptions): Promise<void> {
@@ -39,8 +63,20 @@ export async function startCommand(options: StartOptions): Promise<void> {
 
   if (hasActiveSession(outputDir)) {
     if (options.force) {
+      const existing = loadSession(outputDir);
+      if (existing) {
+        let browserAlive = false;
+        try { ab('get url', { session: existing.sessionName, timeoutMs: 5000 }); browserAlive = true; } catch { /* stale browser */ }
+        const serverAlive = existing.serverProcess
+          ? processIdentityMatches(getProcessIdentity(existing.serverProcess.pid), existing.serverProcess)
+          : false;
+        if (browserAlive || serverAlive) {
+          console.error(chalk.red('✗') + ' Refusing --force because lifecycle checks still find owned session resources. Run "proofshot stop" first.');
+          process.exit(1);
+        }
+      }
       clearSession(outputDir);
-      console.log(chalk.yellow('⚠') + chalk.dim(' Cleared stale session'));
+      console.log(chalk.yellow('⚠') + chalk.dim(' Cleared a session after proving its browser and owned server were stale'));
     } else {
       console.log(
         chalk.yellow('⚠ A session is already active.') +
@@ -62,6 +98,9 @@ export async function startCommand(options: StartOptions): Promise<void> {
 
   let branch = '';
   let commitSha = '';
+  let dirty = false;
+  let changedFiles: string[] = [];
+  let diffHash: string | null = null;
   try {
     branch = execSync('git branch --show-current', {
       encoding: 'utf-8',
@@ -70,6 +109,21 @@ export async function startCommand(options: StartOptions): Promise<void> {
   } catch {
     // Non-fatal outside a git repo.
   }
+  try {
+    const status = execSync('git status --porcelain', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trimEnd();
+    dirty = Boolean(status);
+    changedFiles = parseChangedFiles(status);
+    if (dirty) {
+      const diff = execSync('git diff HEAD --binary', { encoding: 'buffer', stdio: ['pipe', 'pipe', 'pipe'], maxBuffer: 50 * 1024 * 1024 });
+      const untrackedOutput = execSync('git ls-files --others --exclude-standard -z', {
+        encoding: 'buffer',
+        stdio: ['pipe', 'pipe', 'pipe'],
+        maxBuffer: 50 * 1024 * 1024,
+      });
+      const untrackedFiles = untrackedOutput.toString('utf-8').split('\0').filter(Boolean).sort();
+      diffHash = hashWorkingTreeDiff(diff, untrackedFiles);
+    }
+  } catch { /* git provenance remains unavailable */ }
   try {
     commitSha = execSync('git rev-parse HEAD', {
       encoding: 'utf-8',
@@ -84,10 +138,35 @@ export async function startCommand(options: StartOptions): Promise<void> {
     commitSha,
     startedAt: new Date().toISOString(),
     description: options.description || null,
+    dirty,
+    changedFiles,
+    diffHash,
+    proofshotBuildSha: PROOFSHOT_COMMIT,
+    scenarioManifest: options.scenarioManifest || null,
   });
 
   let serverAlreadyRunning = true;
   let serverPumpPid: number | null = null;
+  let serverProcess: Awaited<ReturnType<typeof ensureDevServer>>['processIdentity'] = null;
+  let browserOpened = false;
+  let recordingStarted = false;
+  const ownershipToken = randomUUID();
+
+  const rollback = async (): Promise<void> => {
+    if (recordingStarted) {
+      try { stopRecording(sessionName); } catch { /* continue releasing other resources */ }
+    }
+    if (browserOpened) {
+      try { closeBrowser(sessionName); } catch { /* continue releasing other resources */ }
+    }
+    if (serverProcess) {
+      try { await terminateOwnedProcessTree(serverProcess); } catch (error) {
+        console.error(chalk.red('✗') + ` Startup rollback could not stop the server: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+    clearSession(outputDir);
+    try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch { /* retain partial diagnostics if removal fails */ }
+  };
 
   if (options.run) {
     console.log(chalk.dim(`Starting: ${options.run}`));
@@ -97,12 +176,15 @@ export async function startCommand(options: StartOptions): Promise<void> {
         config.devServer.port,
         config.devServer.startupTimeout,
         serverErrorLog,
+        { takePort: options.takePort, ownershipToken },
       );
       serverPumpPid = serverResult.pumpPid;
+      serverProcess = serverResult.processIdentity;
       serverAlreadyRunning = false;
       console.log(chalk.green('✓') + ` Dev server started on :${config.devServer.port}`);
       console.log(chalk.dim(`  Server logs → ${serverErrorLog}`));
     } catch (error: any) {
+      await rollback();
       console.error(chalk.red('✗') + ` Failed to start dev server: ${error.message}`);
       process.exit(1);
     }
@@ -115,10 +197,11 @@ export async function startCommand(options: StartOptions): Promise<void> {
 
   console.log(chalk.dim('Opening browser...'));
   try {
+    browserOpened = true;
     openBrowser(openUrl, config.viewport, config.headless, sessionName, config.browser);
     console.log(chalk.green('✓') + ' Browser ready');
   } catch (error: any) {
-    closeBrowser();
+    await rollback();
     console.error(
       chalk.red('✗') +
         ` Failed to open browser: ${error.message}\n` +
@@ -129,7 +212,6 @@ export async function startCommand(options: StartOptions): Promise<void> {
 
   const RECORDING_RETRIES = 3;
   const RETRY_DELAY_MS = 2000;
-  let recordingStarted = false;
   let lastError: any;
 
   for (let attempt = 1; attempt <= RECORDING_RETRIES; attempt++) {
@@ -151,7 +233,7 @@ export async function startCommand(options: StartOptions): Promise<void> {
   }
 
   if (!recordingStarted) {
-    closeBrowser();
+    await rollback();
     console.error(
       chalk.red('✗') +
         ` Failed to initialize recording after ${RECORDING_RETRIES} attempts: ${lastError?.message}\n` +
@@ -165,6 +247,8 @@ export async function startCommand(options: StartOptions): Promise<void> {
   }
 
   saveSession({
+    schemaVersion: 2,
+    ownershipToken,
     startedAt: new Date().toISOString(),
     description: options.description || null,
     outputDir,
@@ -176,8 +260,16 @@ export async function startCommand(options: StartOptions): Promise<void> {
     serverCommand: options.run || null,
     serverAlreadyRunning,
     serverPumpPid,
+    serverProcess,
     recordingActive: true,
     viewport: { width: config.viewport.width, height: config.viewport.height },
+    initialViewport: { width: config.viewport.width, height: config.viewport.height },
+    viewportChanges: [],
+    headless: config.headless,
+    deviceScaleFactor: readBrowserNumber('window.devicePixelRatio', sessionName) ?? 1,
+    browserVersion: readBrowserString('navigator.userAgent', sessionName),
+    agentBrowserVersion: readAgentBrowserVersion(),
+    proofshotCommit: PROOFSHOT_COMMIT,
   });
 
   // `exec`/`stop` look in the configured output dir. If --output moved this
@@ -207,4 +299,30 @@ export async function startCommand(options: StartOptions): Promise<void> {
   console.log(chalk.dim('  proofshot exec screenshot step.png    # Capture a moment'));
   console.log('');
   console.log(`When done, run: ${chalk.white('proofshot stop')}`);
+}
+
+function parseBrowserValue(raw: string): unknown {
+  let value: unknown = raw;
+  for (let index = 0; index < 2 && typeof value === 'string'; index++) {
+    try { value = JSON.parse(value); } catch { break; }
+  }
+  return value;
+}
+
+function readBrowserString(expression: string, sessionName: string): string | null {
+  try {
+    const value = parseBrowserValue(ab(`eval ${JSON.stringify(expression)}`, { session: sessionName }));
+    return typeof value === 'string' ? value : null;
+  } catch { return null; }
+}
+
+function readBrowserNumber(expression: string, sessionName: string): number | null {
+  try {
+    const value = parseBrowserValue(ab(`eval ${JSON.stringify(expression)}`, { session: sessionName }));
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+  } catch { return null; }
+}
+
+function readAgentBrowserVersion(): string | null {
+  try { return ab('--version', 5000); } catch { return null; }
 }

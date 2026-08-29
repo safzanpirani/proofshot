@@ -103,7 +103,9 @@ Each session produces a timestamped folder in `./proofshot-artifacts/`:
 | `viewer.html` | Standalone interactive viewer with scrub bar, timeline, and Console/Server log tabs |
 | `SUMMARY.md` | Markdown report with errors, screenshots, and video |
 | `step-*.png` | Screenshots captured at key moments |
-| `session-log.json` | Action timeline with timestamps and element data |
+| `session-log.jsonl` | Append-only action outcomes with timestamps, status, URL, and evidence data |
+| `result.json` | Machine-readable assertions and evidence availability |
+| `manifest.json` | Explicit screenshot and metadata manifest |
 | `server.log` | Dev server stdout/stderr (when using `--run`) |
 | `console-output.log` | Browser console output |
 
@@ -145,6 +147,7 @@ proofshot start --description "Verify checkout flow"    # Add description to rep
 proofshot start --url http://localhost:3000/login       # Open specific URL
 proofshot start --headed                                # Show browser (debugging)
 proofshot start --force                                 # Override a stale session from a previous crash
+proofshot start --run "npm run dev" --take-port         # Deliberately take an occupied port
 ```
 
 You can also configure browser launch behavior in `proofshot.config.json`:
@@ -168,6 +171,7 @@ Stop recording, collect errors, generate proof artifacts.
 ```bash
 proofshot stop              # Stop session and close browser
 proofshot stop --no-close   # Stop but keep browser open
+proofshot stop --allow-incomplete # Deliberately accept unavailable evidence
 ```
 
 ### `proofshot exec`
@@ -179,6 +183,9 @@ When a ProofShot session is active, `proofshot exec` reuses the same isolated `a
 ```bash
 proofshot exec click @e3
 proofshot exec screenshot step-checkout.png
+proofshot screenshot cropped.png --viewport-only
+proofshot assert visible "Checkout"
+proofshot assert no-console-errors
 ```
 
 ### `proofshot diff`
@@ -186,7 +193,7 @@ proofshot exec screenshot step-checkout.png
 Compare current screenshots against a baseline for visual regression.
 
 ```bash
-proofshot diff --baseline ./previous-artifacts
+proofshot diff --baseline ./session-a --current ./session-b --threshold 0.1
 ```
 
 ### `proofshot pr`
@@ -194,8 +201,10 @@ proofshot diff --baseline ./previous-artifacts
 Upload session artifacts to GitHub and post a verification comment on the PR. Finds all sessions recorded on the current branch, uploads screenshots and video, and posts a formatted comment with embedded screenshots.
 
 ```bash
-proofshot pr              # Auto-detect PR from current branch
+proofshot pr              # Latest session matching current HEAD
 proofshot pr 42           # Target a specific PR
+proofshot pr --session ./proofshot-artifacts/session-name
+proofshot pr --all-sessions --sha HEAD
 proofshot pr --dry-run    # Preview the markdown without posting
 proofshot pr --upload-provider github-web-attachments  # Use GitHub's internal attachment flow
 ```
@@ -208,10 +217,12 @@ Converts `.webm` video to `.mp4` if `ffmpeg` is available.
 
 ### `proofshot clean`
 
-Remove the `./proofshot-artifacts/` directory.
+Remove artifacts after validating the configured path.
 
 ```bash
 proofshot clean
+proofshot clean --dry-run --older-than 7d
+proofshot clean --trash --older-than 4w
 ```
 
 ### `proofshot doctor`
@@ -220,6 +231,15 @@ Print the current ProofShot environment, including config path, browser mode, vi
 
 ```bash
 proofshot doctor
+proofshot doctor --json
+```
+
+### `proofshot run`
+
+Run a repeatable scenario with viewports, assertions, screenshots, and error policies.
+
+```bash
+proofshot run proofshot.scenario.json
 ```
 
 ## Supported Agents
@@ -244,7 +264,7 @@ The repo includes sample apps so you can see ProofShot in action without your ow
 ```bash
 git clone https://github.com/AmElmo/proofshot.git
 cd proofshot
-npm install && npm run build && npm link
+pnpm install && pnpm build && pnpm link --global "$(pwd)"
 
 # Set up the sample app
 cd test/fixtures/sample-app
@@ -277,10 +297,10 @@ ProofShot automatically detects errors from server logs across 10+ languages: Ja
 Contributions welcome! The project uses TypeScript (ESM-only) with tsup for builds and vitest for tests.
 
 ```bash
-npm install
-npm run build    # Build (required after changes)
-npm test         # Run tests
-npm run dev      # Watch mode
+pnpm install
+pnpm build       # Build (required after changes)
+pnpm test        # Run tests
+pnpm dev         # Watch mode
 ```
 
 Three sample apps in `test/fixtures/` cover different UI patterns for end-to-end testing: a SaaS dashboard (`sample-app`), a kanban board (`todo-app`), and a chat interface (`chat-app`).

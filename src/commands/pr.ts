@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { execSync } from 'child_process';
+import { execFileSync, execSync } from 'child_process';
 import chalk from 'chalk';
 import { loadConfig } from '../utils/config.js';
 import {
@@ -19,6 +19,11 @@ interface PROptions {
   dryRun?: boolean;
   uploadProvider?: GitHubUploadProvider;
   artifactsBranch?: string;
+  session?: string;
+  sha?: string;
+  allSessions?: boolean;
+  allowStale?: boolean;
+  allowDirty?: boolean;
 }
 
 export async function prCommand(options: PROptions): Promise<void> {
@@ -46,8 +51,30 @@ export async function prCommand(options: PROptions): Promise<void> {
 
   console.log(chalk.dim(`Branch: ${branch}`));
 
+  const headSha = execFileSync('git', ['rev-parse', options.sha || 'HEAD'], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const worktreeDirty = Boolean(execSync('git status --porcelain', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim());
+  if (worktreeDirty && !options.allowDirty) {
+    console.error(chalk.red('✗') + ' Working tree is dirty. Retry with --allow-dirty only when that mismatch is deliberate.');
+    process.exit(1);
+  }
+
   // 2. Find session folders for this branch
-  const sessionDirs = findSessionsForBranch(outputDir, branch);
+  let sessionDirs = options.session
+    ? [path.resolve(options.session)]
+    : findSessionsForBranch(outputDir, branch);
+  if (!options.allSessions && !options.session) {
+    sessionDirs = sessionDirs.filter((dir) => loadMetadata(dir)?.commitSha === headSha).slice(0, 1);
+  }
+  for (const dir of sessionDirs) {
+    const metadata = loadMetadata(dir);
+    if (!metadata) throw new Error(`Session metadata is missing or invalid: ${dir}`);
+    if (metadata.commitSha !== headSha && !options.allowStale) {
+      throw new Error(`Session ${dir} targets ${metadata.commitSha || 'unknown SHA'}, not ${headSha}. Use --allow-stale to override.`);
+    }
+    if (metadata.dirty && !options.allowDirty) {
+      throw new Error(`Session ${dir} recorded a dirty worktree. Use --allow-dirty to override.`);
+    }
+  }
 
   if (sessionDirs.length === 0) {
     console.error(
@@ -71,7 +98,7 @@ export async function prCommand(options: PROptions): Promise<void> {
     const metadata = loadMetadata(sessionDir);
     if (metadata) {
       if (!description && metadata.description) description = metadata.description;
-      if (metadata.commitSha) latestCommitSha = metadata.commitSha;
+      if (!latestCommitSha && metadata.commitSha) latestCommitSha = metadata.commitSha;
     }
 
     const files = fs.readdirSync(sessionDir);
