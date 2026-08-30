@@ -1,79 +1,72 @@
 ---
 name: proofshot
-description: Visual verification of UI features. Use after building or modifying any
-  UI component, page, or visual feature. Starts a verification session with video
-  recording and error capture, then you drive the browser to test, then stop to
-  bundle proof artifacts for the human.
+description: Records and inspects browser proof for visible UI changes. Use after modifying UI, when a user asks for screenshots, demos, recordings, or before-and-after proof, and before claiming that a visual change works.
 compatibility: opencode
 ---
 
-# ProofShot - Visual Verification Workflow
+# ProofShot visual verification workflow
 
-ProofShot is an open-source, agent-agnostic CLI that lets you verify your own work in a real browser - video proof, screenshots, and error reports, no vendor lock-in.
+Use ProofShot after a change affects a visible interface. Use it when the user asks for screenshots, a demo, a recording, or before-and-after proof.
 
-## When to use
+## Check the environment
 
-Use ProofShot after:
-- Building a new UI feature or page
-- Modifying existing UI components
-- Fixing a visual bug
-- Any change that affects what the user sees
+1. Run `proofshot doctor` before starting. Stop if `agent-browser` or `ffmpeg` is unavailable.
+2. Check whether the intended port already has a listener. Choose another port when possible. Use `--take-port` only when you have confirmed that ProofShot may stop the existing listener.
+3. Do not use `--force` as a routine retry. Use it only when `doctor` and lifecycle checks prove that saved session state is stale.
 
-## The workflow (always follow these 3 steps)
-
-### Step 1: Start the session
+## Start the session
 
 ```bash
-proofshot start --run "your-dev-command" --port PORT --description "what you are about to verify"
+proofshot start --run "<dev command>" --port <port> --description "<scope>"
 ```
 
-This opens a browser and begins recording. If the port is already in use, proofshot will kill the existing process automatically.
+Always pass `--run` when ProofShot should own the dev server and capture its logs. Omit `--run` only when the user or another process owns the server. Report server evidence as unavailable in that case.
 
-**Always use `--run`** to let proofshot start and capture your dev server output (server logs appear in the proof report).
-Only omit `--run` if the server was explicitly started by the user or another process - without it, no server logs are captured.
+Use `--output <absolute-path>` when the project volume lacks space. `exec` and `stop` will follow the session pointer.
 
-If a previous session was not stopped cleanly, add `--force` to override it.
+## Drive and verify the interface
 
-### Step 2: Drive the browser and test
-
-Use proofshot exec to navigate, interact, and verify:
+Use ProofShot commands so every action enters the evidence log.
 
 ```bash
-proofshot exec snapshot -i                                    # See interactive elements
-proofshot snapshot -i                                         # Equivalent shorthand
-proofshot exec open http://localhost:PORT/page                # Navigate to a page
-proofshot exec click @e3                                      # Click a button
-proofshot exec fill @e2 "test@example.com"                    # Fill a form field
-proofshot exec screenshot step-NAME.png                       # Capture key moments
+proofshot snapshot -i
+proofshot exec open http://localhost:<port>/<route>
+proofshot exec click @e3
+proofshot exec fill @e2 "example value"
+proofshot assert visible "Expected text"
+proofshot screenshot state.png
 ```
 
-Take screenshots at important moments - these become the visual proof.
-Verify what you expect to see by reading the snapshot output.
+- Use `@eN` references, CSS selectors, or `find`. Do not use Playwright selector syntax such as `text=` or `role=`.
+- Add an assertion for every behavior that the proof must establish.
+- Capture the state before and after important actions. Screenshots use full-page capture by default. Use `--viewport-only` only when a crop is intentional.
+- Open every key screenshot with the runtime's native image viewer. Accessibility output cannot prove spacing, clipping, color, hierarchy, or responsive layout.
 
-If the project volume is low on space, start with `--output` pointing at a
-writable temp directory or another volume.
+## Stop and evaluate the evidence
 
-### Step 3: Stop and bundle the proof
+Run `proofshot stop` after successful and failed actions. ProofShot must close the browser, finalize the video, collect logs, and release any server it owns.
 
-```bash
-proofshot stop
-```
+Treat the run as failed when an assertion or action failed, an error count is nonzero, the session log is malformed, or required console, server, browser, or video evidence is unavailable. `--allow-incomplete` permits diagnostic collection. It does not turn missing evidence into proof.
 
-This stops recording, collects console + server errors, and generates
-a SUMMARY.md with video, screenshots, and error report.
+Never edit generated artifacts to improve the result.
 
-### Step 4 (optional): Post proof to the PR
+## Record before-and-after proof
 
-```bash
-proofshot pr              # Auto-detect PR from current branch
-proofshot pr 42           # Target a specific PR number
-```
+1. Create a unique temporary directory with `mktemp -d`.
+2. Add the base revision as a detached worktree inside that directory.
+3. Record the same actions, assertions, routes, viewport, and screenshot names against the base and current revisions. Use separate ports.
+4. Inspect both screenshot sets and state the visible differences.
+5. Validate the generated worktree path before removing it. Do not use a fixed temporary path or force removal without checking the target.
 
-This uploads screenshots and video to GitHub and posts a formatted comment on the PR. By default it uses the official GitHub contents API on a `proofshot-artifacts` branch. Use `--upload-provider github-web-attachments` if you specifically want GitHub attachment URLs.
+## Publish and report
 
-## Tips
+Run `proofshot pr` only after `stop` produces complete evidence. ProofShot must reject incomplete results and partial uploads.
 
-- Always include a meaningful --description so the human knows what was tested
-- Take screenshots before AND after key actions (e.g., before form submit, after redirect)
-- If you find errors during verification, fix them and re-run the workflow
-- Use `proofshot pr` after stopping to attach proof directly to the pull request
+Report these facts separately:
+
+- Visible observations from screenshots you inspected.
+- Assertion and action results.
+- Console and server errors.
+- Unavailable evidence and remaining human checks.
+
+A recording proves only the flow that ran. Tests remain a separate correctness check.

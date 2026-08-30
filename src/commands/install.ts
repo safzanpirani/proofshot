@@ -30,8 +30,6 @@ interface ToolDefinition {
   skillTarget: SkillTarget;
   /** Path inside the bundled skills/ directory */
   bundledSkill: string;
-  /** Fallback agent key for inline content generation */
-  inlineAgent: string;
 }
 
 interface InstallResult {
@@ -70,7 +68,6 @@ function getToolDefinitions(): ToolDefinition[] {
       configDir: path.join(home, '.claude'),
       skillTarget: { strategy: 'file', relativePath: 'skills/proofshot/SKILL.md' },
       bundledSkill: 'claude/SKILL.md',
-      inlineAgent: 'claude',
     },
     {
       name: 'cursor',
@@ -79,7 +76,6 @@ function getToolDefinitions(): ToolDefinition[] {
       configDir: path.join(home, '.cursor'),
       skillTarget: { strategy: 'file', relativePath: 'rules/proofshot.mdc' },
       bundledSkill: 'cursor/proofshot.mdc',
-      inlineAgent: 'cursor',
     },
     {
       name: 'codex',
@@ -88,7 +84,6 @@ function getToolDefinitions(): ToolDefinition[] {
       configDir: path.join(home, '.codex'),
       skillTarget: { strategy: 'file', relativePath: 'skills/proofshot/SKILL.md' },
       bundledSkill: 'codex/SKILL.md',
-      inlineAgent: 'codex',
     },
     {
       name: 'gemini',
@@ -97,7 +92,6 @@ function getToolDefinitions(): ToolDefinition[] {
       configDir: path.join(home, '.gemini'),
       skillTarget: { strategy: 'append', relativePath: 'GEMINI.md' },
       bundledSkill: 'generic/PROOFSHOT.md',
-      inlineAgent: 'generic',
     },
     {
       name: 'windsurf',
@@ -106,7 +100,6 @@ function getToolDefinitions(): ToolDefinition[] {
       configDir: path.join(home, '.codeium', 'windsurf'),
       skillTarget: { strategy: 'append', relativePath: 'memories/global_rules.md' },
       bundledSkill: 'generic/PROOFSHOT.md',
-      inlineAgent: 'generic',
     },
     {
       name: 'opencode',
@@ -115,7 +108,6 @@ function getToolDefinitions(): ToolDefinition[] {
       configDir: path.join(home, '.config', 'opencode'),
       skillTarget: { strategy: 'file', relativePath: 'skills/proofshot/SKILL.md' },
       bundledSkill: 'opencode/SKILL.md',
-      inlineAgent: 'codex',
     },
   ];
 }
@@ -172,7 +164,10 @@ function filterTools(
 // ---------------------------------------------------------------------------
 
 function getSkillContent(tool: ToolDefinition): string {
-  return getInlineSkillContent(tool.inlineAgent);
+  const fallbackAgent = tool.name === 'gemini' || tool.name === 'windsurf'
+    ? 'generic'
+    : tool.name;
+  return readBundledSkill(tool.bundledSkill) ?? getInlineSkillContent(fallbackAgent);
 }
 
 // ---------------------------------------------------------------------------

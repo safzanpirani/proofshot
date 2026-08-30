@@ -17,3 +17,12 @@ While migrating this repository to pnpm, exec_command rejected an explicit valid
 - **Tags:** `misleading-error`
 
 pnpm self-update --help presents self-update as the update path, but the installed Corepack-managed pnpm rejects it with ERR_PNPM_CANT_SELF_UPDATE_IN_COREPACK. The command should direct users to the exact Corepack activation command before they attempt the update.
+
+## 41ff03 · 2026-08-30T21:18:37.236Z — codex — gpt-5.6-sol
+
+- **Directory:** `/Users/safzan/Development/projects/agentwork/proofshot`
+- **About:** `skill-creator`
+- **Tags:** `docs`
+- **Hit again:** 2026-08-30T21:18:50.918Z (2 total)
+
+The skill-creator instructions call README.md optional, but scripts/validate_skill.py rejects an otherwise valid skill when README.md is absent. Align the validator with the documented optional status or document the requirement.
