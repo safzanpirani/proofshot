@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { loadConfig } from '../utils/config.js';
-import { abArgs, buildAgentBrowserCommand, setAgentBrowserDefaults } from '../utils/exec.js';
+import { abArgs, setAgentBrowserDefaults } from '../utils/exec.js';
 import { loadSession, saveSession, type SessionState } from '../session/state.js';
 import { writeJsonAtomic } from '../utils/atomic.js';
 
@@ -239,30 +239,6 @@ export function materializeCurlInput(args: string[]): {
 }
 
 /**
- * Build the shell command string for agent-browser.
- *
- * For `eval` commands, we need to pass the JS code as a single quoted argument
- * to prevent the shell from interpreting parentheses, brackets, etc.
- * For other commands, simple joining is fine.
- */
-export function buildShellCommand(args: string[], sessionName?: string): string {
-  if (args[0] === 'eval' && args.length > 1) {
-    const jsCode = args.slice(1).join(' ');
-    const escaped = jsCode.replace(/'/g, "'\\''");
-    return buildAgentBrowserCommand(`eval '${escaped}'`, { session: sessionName });
-  }
-
-  const quotedArgs = args.map((arg) => {
-    if (/[(){}[\]$`!#&|;<>*? "'\\]/.test(arg)) {
-      const escaped = arg.replace(/'/g, "'\\''");
-      return `'${escaped}'`;
-    }
-    return arg;
-  });
-  return buildAgentBrowserCommand(quotedArgs.join(' '), { session: sessionName });
-}
-
-/**
  * Parse an element ref (@eN) from command args.
  */
 function parseElementRef(args: string[]): string | null {
@@ -362,8 +338,8 @@ function isRefTargetedAction(args: string[]): boolean {
  * 2. For screenshot commands, resolve paths into the session dir
  * 3. For ref-targeted actions, capture element bbox + label BEFORE execution
  * 4. Calculate timestamp relative to session start
- * 5. Append entry to session-log.json
- * 6. Pass through to agent-browser and return its output
+ * 5. Pass through to agent-browser and return its output
+ * 6. Append the outcome to session-log.jsonl
  * 7. If action was `set viewport`, update cached viewport in session state
  */
 export async function execCommand(args: string[]): Promise<void> {

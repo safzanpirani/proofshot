@@ -32,20 +32,23 @@ The choice of agent-browser as the browser automation layer is the most importan
 
 **Lightweight context.** agent-browser's snapshot output is ~93% smaller than Playwright MCP's equivalent. This matters because AI agents have context limits — smaller snapshots mean more room for reasoning.
 
-**Built-in recording.** Playwright's screencast API is exposed directly, so video recording comes free without ffmpeg during capture (ffmpeg is only used for optional post-processing trim).
+**Built-in recording.** Playwright's screencast API captures the video without ffmpeg. ProofShot uses ffprobe to validate the resulting file. ProofShot uses ffmpeg for optional dead-time trimming and PR upload conversion.
 
-All browser commands in ProofShot go through a single function:
+All browser commands in ProofShot go through one shell-free wrapper:
 
 ```typescript
 // src/utils/exec.ts
-export function ab(command: string, timeoutMs = 30000): string {
-  return execSync(`agent-browser ${command}`, {
+export function abArgs(args: readonly string[], options: AgentBrowserCommandOptions = {}): string {
+  const fullArgs = buildAgentBrowserArgs(args, options);
+  return execFileSync('agent-browser', fullArgs, {
     encoding: 'utf-8',
-    timeout: timeoutMs,
+    timeout: options.timeoutMs ?? 30000,
     stdio: ['pipe', 'pipe', 'pipe'],
   }).trim();
 }
 ```
+
+The argv boundary prevents shell injection and preserves argument values. ProofShot redacts values from logged `fill` and `type` actions.
 
 ## Session lifecycle
 
@@ -57,14 +60,16 @@ ProofShot uses a three-phase model: **start**, **exec** (repeated), **stop**.
 proofshot start --run "npm run dev" --port 3000 --description "Login flow"
 ```
 
-1. Check if port is already occupied (fail fast if `--run` conflicts)
-2. Spawn dev server as a detached process, pipe stdout/stderr to `server.log`
-3. Wait for port to become available (polls every 500ms, 30s timeout)
-4. Open headless Chromium via agent-browser
-5. Start video recording (Playwright screencast → `.webm`)
-6. Write `.session.json` to the artifacts directory
+1. Acquire an atomic start lock and reject an active session
+2. Refuse an occupied `--run` port unless the caller passes `--take-port`
+3. Spawn the dev server under a detached log pump and pipe output to `server.log`
+4. Wait for the server to listen on the configured port
+5. Open Chromium in a named agent-browser session
+6. Start video recording with Playwright screencast
+7. Write validated `.session.json` state atomically and write `metadata.json`
+8. Write a session pointer when `--output` differs from the configured output directory
 
-Recording is mandatory. If it fails after 3 retries, the session aborts. Video proof is the whole point.
+Recording is mandatory. ProofShot rolls back the browser, owned server, state, and partial session directory when startup fails. `--force` only clears a session after lifecycle checks prove that its resources are stale.
 
 ### Exec
 
@@ -76,10 +81,11 @@ proofshot exec screenshot step-login.png
 Each `exec` call:
 
 1. Loads `.session.json`, validates recording is active
-2. For click/fill/type actions targeting `@eN` refs: captures element bounding box and label *before* execution (used for viewer overlays)
-3. Appends an entry to `session-log.json` with relative timestamp and element data
-4. Forwards the command to agent-browser
-5. Returns agent-browser's output
+2. Resolves screenshot paths inside the active session directory
+3. Captures optional overlay data before a ref-targeted action
+4. Forwards an argv array to agent-browser
+5. Appends the outcome to `session-log.jsonl` with start and finish times, exit status, resulting URL, assertion data, and redacted diagnostics
+6. Returns agent-browser's output and status
 
 The element data capture uses a multi-strategy approach because agent-browser's `get box` command doesn't accept refs directly:
 - Try to get the element's `id` attribute, then query by `#id`
@@ -95,11 +101,14 @@ proofshot stop
 1. Collect console errors and console output from the browser (point-in-time snapshots)
 2. Stop video recording
 3. Close browser (unless `--no-close`)
-4. **Trim video** — remove dead time before first action (5s buffer) and after last action (3s buffer) using ffmpeg. Adjust all `session-log.json` timestamps by the trim offset to stay in sync with the trimmed video.
-5. **Extract server errors** — scan `server.log` with multi-language regex patterns
-6. Generate `SUMMARY.md` — markdown report with description, video link, screenshots, and errors
-7. Generate `viewer.html` — standalone interactive viewer
-8. Clear `.session.json`
+4. Validate the video with ffprobe
+5. **Trim video** — select the nearest preceding keyframe and remove dead time with ffmpeg. Restore the validated original when trimming fails
+6. **Extract server errors** — scan `server.log` with multi-language regex patterns
+7. Validate the JSONL action log and collect assertion results
+8. Generate `result.json`, `manifest.json`, `SUMMARY.md`, and `viewer.html`
+9. Stop the exact owned server process and clear safe session state
+
+The viewer applies the video trim offset to its in-memory timeline. ProofShot preserves the append-only action log. Missing or malformed required evidence marks `result.json` as incomplete. `proofshot stop` returns a nonzero status unless the caller explicitly passes `--allow-incomplete`.
 
 ## Interactive viewer
 
@@ -128,7 +137,8 @@ Key features:
 - **Scrub bar markers** — each action gets a marker on the progress bar, positioned at its timestamp. Click a marker to jump to that moment.
 - **Action overlays** — click ripples, scroll indicators, and action label toasts rendered on a transparent layer over the video, synced via `requestAnimationFrame`. Coordinates are scaled from the original viewport size to the current video display size.
 - **Timeline sync** — clicking a step in the timeline seeks the video. Playing the video highlights the current step and auto-scrolls it into view.
-- **Error badges** — top-right corner shows console and server error counts (green = clean, red = N errors).
+- **Error badges** — top-right corner shows captured console and server error counts. Green means the captured source has no detected errors. Red means the captured source has errors.
+- **Safe rendering** — inline data escapes script delimiters. Untrusted labels and log text render through DOM text nodes.
 
 ## Skill installation
 
@@ -191,7 +201,7 @@ src/
 │   └── bundle.ts             # Artifact bundling
 └── utils/
     ├── config.ts             # Config file search + merge
-    ├── exec.ts               # ab() and exec() shell wrappers
+    ├── exec.ts               # Shell-free agent-browser argv wrapper and process helpers
     ├── error-patterns.ts     # Multi-language regex patterns
     ├── port.ts               # isPortOpen, waitForPort
     └── skills.ts             # Skill file bundling
@@ -203,10 +213,10 @@ src/
 
 **tsup with two entry points.** The CLI binary (`bin/proofshot.ts`) builds to a single file with a shebang. The library entry (`src/index.ts`) builds with code splitting and `.d.ts` generation. This supports both CLI usage and programmatic import by other tools.
 
-**Minimal dependencies.** Only three production dependencies: `commander` (CLI framework), `chalk` (terminal colors), `detect-port` (port checking). agent-browser is an optional peer dependency. This keeps the install fast and the supply chain small.
+**Minimal dependencies.** Five production dependencies cover the CLI, terminal output, port detection, and PNG comparison. agent-browser remains an optional peer dependency.
 
-**Session state in the output directory.** `.session.json` lives alongside artifacts, not in a global location. This allows parallel sessions in different projects and ensures `proofshot clean` removes everything.
+**Session state in the output directory.** `.session.json` lives in the configured output directory. An atomic start lock prevents concurrent starts for the same configured root. A pointer connects custom output directories to later `exec` and `stop` calls.
 
 **Config file walk-up.** `proofshot.config.json` is searched from cwd upward to filesystem root, supporting monorepo layouts where config lives at the repo root.
 
-**Graceful degradation everywhere.** Missing ffmpeg skips video trimming. Failed element data capture skips overlays. Browser already closed gets a silent catch. Console errors unavailable shows "0 errors". Non-critical failures never abort a session.
+**Fail closed for proof.** Optional overlay capture can fail without ending a session. Required video, action-log, console, and managed-server evidence receives an explicit availability status. Missing or malformed required evidence produces an incomplete result and a nonzero exit status. `--allow-incomplete` provides an explicit diagnostic escape hatch without turning incomplete evidence into a clean result.

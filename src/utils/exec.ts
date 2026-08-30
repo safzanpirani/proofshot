@@ -1,4 +1,4 @@
-import { execFileSync, execSync, type ChildProcess } from 'child_process';
+import { execFileSync, type ChildProcess } from 'child_process';
 import { spawnShellCommand } from './process.js';
 
 export class ProofShotError extends Error {
@@ -23,24 +23,6 @@ export function setAgentBrowserDefaults(
   options: Pick<AgentBrowserCommandOptions, 'configPath'>,
 ): void {
   defaultAgentBrowserOptions = { ...options };
-}
-
-function shellQuote(value: string): string {
-  const escaped = value.replace(/'/g, "'\\''");
-  return `'${escaped}'`;
-}
-
-export function buildAgentBrowserCommand(
-  command: string,
-  options: Pick<AgentBrowserCommandOptions, 'configPath' | 'session'> = {},
-): string {
-  const mergedOptions = {
-    ...defaultAgentBrowserOptions,
-    ...options,
-  };
-  const configFlag = mergedOptions.configPath ? ` --config ${shellQuote(mergedOptions.configPath)}` : '';
-  const sessionFlag = mergedOptions.session ? ` --session ${shellQuote(mergedOptions.session)}` : '';
-  return `agent-browser${configFlag}${sessionFlag} ${command}`;
 }
 
 export function buildAgentBrowserArgs(
@@ -143,19 +125,6 @@ export function ab(
   timeoutOrOptions: number | AgentBrowserCommandOptions = 30000,
 ): string {
   return abArgs(parseCommandArgs(command), timeoutOrOptions);
-}
-
-export function exec(command: string, timeoutMs = 30000): string {
-  try {
-    return execSync(command, {
-      encoding: 'utf-8',
-      timeout: timeoutMs,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
-  } catch (error: any) {
-    const stderr = error?.stderr?.toString?.() || '';
-    throw new ProofShotError(`Command failed: ${command}\n${stderr}`, error);
-  }
 }
 
 export function spawnBackground(

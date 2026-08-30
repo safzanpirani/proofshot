@@ -20,7 +20,6 @@ vi.mock('../session/state.js', () => ({
 }));
 vi.mock('../utils/exec.js', () => ({
   abArgs: mocks.abArgs,
-  buildAgentBrowserCommand: vi.fn((command: string) => `agent-browser ${command}`),
   setAgentBrowserDefaults: mocks.setAgentBrowserDefaults,
 }));
 

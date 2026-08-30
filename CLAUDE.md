@@ -18,7 +18,7 @@ src/
 ├── commands/               # One file per CLI command (install, start, stop, exec, diff, pr, clean)
 ├── browser/                # agent-browser CLI wrappers (session, capture, interact, navigate)
 ├── server/                 # Dev server detection, startup, port waiting
-├── session/state.ts        # .session.json lifecycle (save/load/clear)
+├── session/state.ts        # Atomic session state, start lock, and custom-output pointer
 ├── session/metadata.ts     # Persistent per-session metadata (branch, commit) for PR matching
 ├── artifacts/              # Output generation (viewer.html, SUMMARY.md, PR format)
 └── utils/                  # Config, exec helpers, port utils, error patterns, GitHub API
@@ -30,17 +30,17 @@ src/
 
 - **ESM only** — all imports MUST use `.js` extensions: `import { foo } from '../utils/config.js'`
 - **Build before test** — CLI runs from `dist/`, always run `pnpm build` after code changes
-- **agent-browser** — external peer dependency (Rust CLI + Node daemon). All browser commands go through `ab()` in `utils/exec.ts` which calls `agent-browser <command>` via `execSync`
-- **Session state** — `start` writes `.session.json`, `exec` and `stop` read it. `stop` clears it. Don't assume session exists without checking
+- **agent-browser** — external peer dependency (Rust CLI + Node daemon). Browser calls use `abArgs()` in `utils/exec.ts`. The wrapper passes an argv array to `execFileSync` without a command shell
+- **Session state** — `start` acquires an atomic start lock and writes `.session.json` atomically. `exec` and `stop` validate the state before use. A custom output directory leaves a pointer in the configured output directory. `stop` clears state after safe resource cleanup
 - **Session metadata** — `start` writes `metadata.json` inside each session folder with git branch/commit. This persists after `stop` and is used by `pr` to match sessions to branches
 - **Per-session subfolders** — artifacts go in `proofshot-artifacts/YYYY-MM-DD_HH-mm-ss_slug/`
 
 ## Command lifecycle
 
-1. `proofshot start` — spawns dev server, opens browser, starts recording, saves session state + writes `metadata.json` with git branch/commit
-2. `proofshot exec <args>` — logs action to `session-log.json`, forwards to `agent-browser`
-3. `proofshot stop` — collects errors, stops recording, trims video, generates SUMMARY.md + viewer.html, clears session
-4. `proofshot pr [number]` — finds sessions for current branch, uploads artifacts to GitHub, posts PR comment
+1. `proofshot start` — claims the session, optionally spawns the dev server, opens the browser, starts recording, saves session state, and writes `metadata.json`
+2. `proofshot exec <args>` — forwards argv to `agent-browser` and appends the outcome to `session-log.jsonl`
+3. `proofshot stop` — collects evidence, validates and optionally trims the video, writes structured and human-readable results, cleans up owned resources, and clears safe session state
+4. `proofshot pr [number]` — matches sessions to the current revision, rejects incomplete or stale proof by default, uploads complete artifact sets, and posts a PR comment
 
 ## Adding a new command
 
@@ -68,10 +68,12 @@ Edit `src/utils/error-patterns.ts` — add a new entry to the `PATTERNS` array:
 |---|---|---|
 | `metadata.json` | `start` | Git branch, commit SHA, timestamp (persists after stop) |
 | `session.webm` | `start` | Video recording (Playwright screencast) |
-| `session-log.json` | `exec` (appended each call) | Action timeline with relative timestamps |
+| `session-log.jsonl` | `exec` (appended each call) | Action outcomes with start and finish times, status, URL, and evidence data |
 | `server.log` | `start` (piped stdout+stderr) | All dev server output |
 | `console-output.log` | `stop` | Browser console output |
 | `step-*.png` | `exec screenshot` | Screenshots at key moments |
+| `result.json` | `exec`, `stop` | Assertions, evidence availability, error counts, and action-log integrity |
+| `manifest.json` | `stop` | Machine-readable artifact inventory |
 | `SUMMARY.md` | `stop` | Markdown report with errors and screenshots |
 | `viewer.html` | `stop` | Standalone HTML viewer with video + timeline |
 
@@ -89,7 +91,9 @@ Edit `src/utils/error-patterns.ts` — add a new entry to the `PATTERNS` array:
 
 ## Gotchas
 
-- `proofshot exec` has special shell quoting logic (`buildShellCommand` in exec.ts) — `eval` commands get single-quoted, args with special chars get auto-quoted
-- Video trimming adjusts session-log.json timestamps to match the trimmed video (see `trimOffsetSec` in stop.ts)
-- Server log capture only works when proofshot starts the server itself — if the port is already occupied, we skip spawning and get no server logs
-- The `consoleErrors`/`consoleOutput` from agent-browser are point-in-time snapshots collected at stop time
+- `proofshot exec` sends argument arrays directly to `agent-browser`. It does not interpolate browser arguments through a shell. Logged `fill` and `type` actions redact entered values
+- Video trimming seeks to the nearest preceding keyframe. A failed trim restores the validated original. The viewer applies `trimOffsetSec` to its in-memory timeline without rewriting `session-log.jsonl`
+- `proofshot start --run` refuses an occupied port by default. `--take-port` grants explicit permission to stop the current owner
+- `--force` only clears a session after lifecycle checks prove that its browser and owned server resources are stale
+- Server log capture requires `proofshot start --run`. A session without `--run` records the server evidence status as unavailable without a managed server
+- Console collection occurs at stop time. Missing console, video, server, or action-log evidence marks verification as incomplete and returns a nonzero status unless the caller passes `--allow-incomplete`
