@@ -61,15 +61,15 @@ export function findPidsListeningOnPort(
       return parseWindowsNetstatOutput(output, port);
     }
 
-    const output = (execFn(`lsof -ti:${port}`, {
+    const output = (execFn(`lsof -nP -a -iTCP:${port} -sTCP:LISTEN -t`, {
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
     }) as string).trim();
 
-    return output
+    return [...new Set(output
       .split(/\r?\n/)
       .map((pid) => Number(pid))
-      .filter((pid) => Number.isInteger(pid));
+      .filter((pid) => Number.isInteger(pid) && pid > 0))];
   } catch {
     return [];
   }

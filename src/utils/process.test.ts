@@ -139,16 +139,25 @@ describe('findPidsListeningOnPort', () => {
   });
 
   it('parses lsof output on POSIX', () => {
-    const execFn = vi.fn().mockReturnValue('111\n222\n');
+    const execFn = vi.fn().mockReturnValue('111\n222\n111\n');
 
     expect(findPidsListeningOnPort(3000, 'linux', execFn as never)).toEqual([111, 222]);
-    expect(execFn).toHaveBeenCalledWith('lsof -ti:3000', expect.anything());
+    expect(execFn).toHaveBeenCalledWith(
+      'lsof -nP -a -iTCP:3000 -sTCP:LISTEN -t',
+      expect.anything(),
+    );
   });
 
   it('returns no pids when the lookup command is unavailable', () => {
     const execFn = vi.fn().mockImplementation(() => {
       throw new Error('lsof: command not found');
     });
+
+    expect(findPidsListeningOnPort(3000, 'linux', execFn as never)).toEqual([]);
+  });
+
+  it('returns no pids when lsof returns empty output', () => {
+    const execFn = vi.fn().mockReturnValue('');
 
     expect(findPidsListeningOnPort(3000, 'linux', execFn as never)).toEqual([]);
   });

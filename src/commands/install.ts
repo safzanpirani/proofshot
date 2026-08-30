@@ -54,6 +54,7 @@ export interface InstallOptions {
 
 const MARKER_START = '<!-- proofshot:start -->';
 const MARKER_END = '<!-- proofshot:end -->';
+const TOOL_NAMES: ToolName[] = ['claude', 'cursor', 'codex', 'gemini', 'windsurf', 'opencode'];
 
 // ---------------------------------------------------------------------------
 // Tool registry
@@ -139,6 +140,16 @@ function detectInstalledTools(): ToolDefinition[] {
   );
 }
 
+export function parseToolFilter(value: string, option: '--only' | '--skip'): Set<ToolName> {
+  const names = value.split(',').map((name) => name.trim().toLowerCase());
+  const invalid = names.filter((name) => !TOOL_NAMES.includes(name as ToolName));
+  if (invalid.length > 0) {
+    const rendered = invalid.map((name) => name || '<empty>').join(', ');
+    throw new Error(`Invalid ${option} tool name(s): ${rendered}. Expected: ${TOOL_NAMES.join(', ')}`);
+  }
+  return new Set(names as ToolName[]);
+}
+
 function filterTools(
   detected: ToolDefinition[],
   only?: string,
@@ -146,11 +157,11 @@ function filterTools(
 ): ToolDefinition[] {
   let tools = detected;
   if (only) {
-    const onlySet = new Set(only.split(',').map((s) => s.trim().toLowerCase()));
+    const onlySet = parseToolFilter(only, '--only');
     tools = tools.filter((t) => onlySet.has(t.name));
   }
   if (skip) {
-    const skipSet = new Set(skip.split(',').map((s) => s.trim().toLowerCase()));
+    const skipSet = parseToolFilter(skip, '--skip');
     tools = tools.filter((t) => !skipSet.has(t.name));
   }
   return tools;
@@ -170,6 +181,18 @@ function getSkillContent(tool: ToolDefinition): string {
 
 function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export function getAppendMarkerStatus(existing: string): 'absent' | 'valid' | 'malformed' {
+  const startCount = existing.split(MARKER_START).length - 1;
+  const endCount = existing.split(MARKER_END).length - 1;
+  if (startCount === 0 && endCount === 0) return 'absent';
+  if (
+    startCount === 1
+    && endCount === 1
+    && existing.indexOf(MARKER_START) < existing.indexOf(MARKER_END)
+  ) return 'valid';
+  return 'malformed';
 }
 
 function installFile(
@@ -219,8 +242,19 @@ function installAppend(
 
   if (exists) {
     const existing = fs.readFileSync(targetPath, 'utf-8');
+    const markerStatus = getAppendMarkerStatus(existing);
 
-    if (existing.includes(MARKER_START)) {
+    if (markerStatus === 'malformed') {
+      return {
+        tool: tool.name,
+        displayName: tool.displayName,
+        status: 'failed',
+        path: targetPath,
+        message: 'ProofShot markers are malformed; repair the existing marker block before reinstalling',
+      };
+    }
+
+    if (markerStatus === 'valid') {
       // Replace existing marked block
       const regex = new RegExp(
         `${escapeRegex(MARKER_START)}[\\s\\S]*?${escapeRegex(MARKER_END)}`,
@@ -404,7 +438,14 @@ function checkboxSelect(tools: ToolDefinition[]): Promise<ToolDefinition[]> {
 
 export async function installCommand(options: InstallOptions): Promise<void> {
   const allDetected = detectInstalledTools();
-  const tools = filterTools(allDetected, options.only, options.skip);
+  let tools: ToolDefinition[];
+  try {
+    tools = filterTools(allDetected, options.only, options.skip);
+  } catch (error) {
+    console.error(chalk.red(`Error: ${error instanceof Error ? error.message : error}`));
+    process.exitCode = 1;
+    return;
+  }
 
   if (tools.length === 0) {
     if (options.only || options.skip) {

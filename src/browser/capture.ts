@@ -1,4 +1,4 @@
-import { ab } from '../utils/exec.js';
+import { abArgs } from '../utils/exec.js';
 import * as fs from 'fs';
 import pixelmatch from 'pixelmatch';
 import { PNG } from 'pngjs';
@@ -7,29 +7,30 @@ import { PNG } from 'pngjs';
  * Start video recording to the given file path.
  */
 export function startRecording(outputPath: string, sessionName?: string): void {
-  ab(`record start ${outputPath}`, { timeoutMs: 10000, session: sessionName });
+  abArgs(['record', 'start', outputPath], { timeoutMs: 10000, session: sessionName });
 }
 
 /**
  * Stop the current recording.
  */
 export function stopRecording(sessionName?: string): void {
-  ab('record stop', { timeoutMs: 120000, session: sessionName });
+  abArgs(['record', 'stop'], { timeoutMs: 120000, session: sessionName });
 }
 
 /**
  * Take a screenshot and save to the given path.
  */
 export function takeScreenshot(outputPath: string, fullPage = true, sessionName?: string): void {
-  const fullFlag = fullPage ? ' --full' : '';
-  ab(`screenshot ${outputPath}${fullFlag}`, { timeoutMs: 15000, session: sessionName });
+  const args = ['screenshot', outputPath];
+  if (fullPage) args.push('--full');
+  abArgs(args, { timeoutMs: 15000, session: sessionName });
 }
 
 /**
  * Take an annotated screenshot (labels interactive elements).
  */
 export function takeAnnotatedScreenshot(outputPath: string, sessionName?: string): void {
-  ab(`screenshot ${outputPath} --annotate`, { timeoutMs: 15000, session: sessionName });
+  abArgs(['screenshot', outputPath, '--annotate'], { timeoutMs: 15000, session: sessionName });
 }
 
 /**

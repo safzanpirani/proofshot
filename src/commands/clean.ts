@@ -21,6 +21,19 @@ export function parseAge(value: string): number {
 
 export function validateCleanupPath(target: string, cwd = process.cwd(), home = os.homedir()): string {
   const resolved = path.resolve(target);
+  const parsed = path.parse(resolved);
+  let componentPath = parsed.root;
+  for (const component of resolved.slice(parsed.root.length).split(path.sep).filter(Boolean)) {
+    componentPath = path.join(componentPath, component);
+    try {
+      if (fs.lstatSync(componentPath).isSymbolicLink()) {
+        throw new Error(`Refusing to clean directory through a symbolic link: ${componentPath}`);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') break;
+      throw error;
+    }
+  }
   const roots = new Set([path.parse(resolved).root, path.resolve(home), path.resolve(cwd)]);
   try {
     roots.add(execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim());

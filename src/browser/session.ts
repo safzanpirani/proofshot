@@ -1,5 +1,17 @@
-import { ab, ProofShotError } from '../utils/exec.js';
+import { abArgs } from '../utils/exec.js';
 import type { BrowserConfig, ViewportConfig } from '../utils/config.js';
+
+export function buildOpenBrowserArgs(
+  url: string,
+  headless = true,
+  browserConfig?: BrowserConfig,
+): string[] {
+  const args = ['open', url];
+  if (!headless) args.push('--headed');
+  if (browserConfig?.ignoreHttpsErrors) args.push('--ignore-https-errors');
+  if (browserConfig?.executablePath) args.push('--executable-path', browserConfig.executablePath);
+  return args;
+}
 
 export function buildOpenBrowserCommand(
   url: string,
@@ -27,8 +39,8 @@ export function openBrowser(
   sessionName?: string,
   browserConfig?: BrowserConfig,
 ): void {
-  ab(buildOpenBrowserCommand(url, headless, browserConfig), { timeoutMs: 60000, session: sessionName });
-  ab(`set viewport ${viewport.width} ${viewport.height}`, { session: sessionName });
+  abArgs(buildOpenBrowserArgs(url, headless, browserConfig), { timeoutMs: 60000, session: sessionName });
+  abArgs(['set', 'viewport', String(viewport.width), String(viewport.height)], { session: sessionName });
 }
 
 /**
@@ -36,7 +48,7 @@ export function openBrowser(
  */
 export function closeBrowser(sessionName?: string): void {
   try {
-    ab('close', { session: sessionName });
+    abArgs(['close'], { session: sessionName });
   } catch {
     // Browser may already be closed — that's fine
   }
@@ -47,7 +59,7 @@ export function closeBrowser(sessionName?: string): void {
  */
 export function checkAgentBrowser(): boolean {
   try {
-    ab('--version', 5000);
+    abArgs(['--version'], 5000);
     return true;
   } catch {
     return false;
@@ -58,14 +70,14 @@ export function checkAgentBrowser(): boolean {
  * Get any console errors from the current page.
  */
 export function getConsoleErrors(sessionName?: string): string {
-  return ab('errors', { session: sessionName });
+  return abArgs(['errors'], { session: sessionName });
 }
 
 /**
  * Get console output from the current page.
  */
 export function getConsoleOutput(sessionName?: string): string {
-  return ab('console', { session: sessionName });
+  return abArgs(['console'], { session: sessionName });
 }
 
 export interface ConsoleMessage {
@@ -78,7 +90,7 @@ export interface ConsoleMessage {
  * Get console output as structured JSON with per-message timestamps.
  */
 export function getConsoleOutputJson(sessionName?: string): ConsoleMessage[] {
-  const raw = ab('console --json', { session: sessionName });
+  const raw = abArgs(['console', '--json'], { session: sessionName });
   const parsed = JSON.parse(raw);
   const messages = parsed?.data?.messages ?? parsed;
   if (!Array.isArray(messages)) throw new Error('agent-browser returned malformed console data');
@@ -90,7 +102,7 @@ export function getConsoleOutputJson(sessionName?: string): ConsoleMessage[] {
  */
 export function getPageTitle(sessionName?: string): string {
   try {
-    return ab('get title', { session: sessionName });
+    return abArgs(['get', 'title'], { session: sessionName });
   } catch {
     return '';
   }
@@ -101,7 +113,7 @@ export function getPageTitle(sessionName?: string): string {
  */
 export function getPageUrl(sessionName?: string): string {
   try {
-    const raw = ab(`eval ${JSON.stringify('window.location.href')}`, { session: sessionName });
+    const raw = abArgs(['eval', 'window.location.href'], { session: sessionName });
     const parsed = JSON.parse(raw);
     return typeof parsed === 'string' ? parsed : '';
   } catch {

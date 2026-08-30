@@ -26,13 +26,17 @@ function loadScenario(filePath: string): Scenario {
 export async function runCommand(scenarioPath: string): Promise<void> {
   const resolved = path.resolve(scenarioPath);
   const scenario = loadScenario(resolved);
-  await startCommand({
+  const started = await startCommand({
     run: scenario.run,
     port: scenario.port,
     url: scenario.url ? `http://localhost:${scenario.port}${scenario.url}` : undefined,
     description: scenario.description || `Scenario ${path.basename(resolved)}`,
     scenarioManifest: resolved,
   });
+  if (!started) {
+    process.exitCode = 1;
+    return;
+  }
   let actionFailed = false;
   try {
     for (const [width, height] of scenario.viewports) {

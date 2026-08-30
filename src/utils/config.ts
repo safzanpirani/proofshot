@@ -135,6 +135,7 @@ export function loadConfig(startDir?: string): ProofShotConfig {
     }
     return {
       ...parsed,
+      output: path.resolve(configDir, parsed.output),
       browser: resolvedBrowser,
     };
   } catch (error) {

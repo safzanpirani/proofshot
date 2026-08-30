@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'crypto';
 import chalk from 'chalk';
 import { execSync } from 'child_process';
 import { loadConfig } from '../utils/config.js';
-import { ab, setAgentBrowserDefaults } from '../utils/exec.js';
+import { ab, abArgs, setAgentBrowserDefaults } from '../utils/exec.js';
 import { ensureDevServer } from '../server/start.js';
 import { closeBrowser, openBrowser } from '../browser/session.js';
 import { startRecording, stopRecording } from '../browser/capture.js';
@@ -13,7 +13,10 @@ import {
   saveSession,
   hasActiveSession,
   clearSession,
+  acquireSessionStartLock,
   generateAgentBrowserSessionName,
+  releaseSessionStartLock,
+  type SessionStartLock,
   writeSessionPointer,
   loadSession,
 } from '../session/state.js';
@@ -50,7 +53,7 @@ export function hashWorkingTreeDiff(trackedDiff: Buffer, untrackedFiles: string[
   return hash.digest('hex');
 }
 
-export async function startCommand(options: StartOptions): Promise<void> {
+export async function startCommand(options: StartOptions): Promise<boolean> {
   const config = loadConfig();
   const defaultOutputDir = path.resolve(config.output);
   setAgentBrowserDefaults({ configPath: config.browser.configPath });
@@ -60,29 +63,51 @@ export async function startCommand(options: StartOptions): Promise<void> {
 
   const outputDir = path.resolve(config.output);
   const timestamp = generateTimestamp();
+  const sessionRoots = [...new Set([defaultOutputDir, outputDir])];
+  let startLock: SessionStartLock;
+  try {
+    startLock = acquireSessionStartLock(defaultOutputDir);
+  } catch (error) {
+    console.error(chalk.red('✗') + ` Could not start a session: ${error instanceof Error ? error.message : error}`);
+    process.exitCode = 1;
+    return false;
+  }
+  let startLockReleased = false;
+  const releaseStartLock = (): void => {
+    if (startLockReleased) return;
+    releaseSessionStartLock(startLock);
+    startLockReleased = true;
+  };
+  const activeSessionRoots = sessionRoots.filter((root) => hasActiveSession(root));
 
-  if (hasActiveSession(outputDir)) {
+  if (activeSessionRoots.length > 0) {
     if (options.force) {
-      const existing = loadSession(outputDir);
-      if (existing) {
+      const existingSessions = activeSessionRoots
+        .map((root) => loadSession(root))
+        .filter((session, index, sessions) => session !== null && sessions.findIndex((candidate) => candidate?.outputDir === session.outputDir && candidate.sessionName === session.sessionName) === index);
+      for (const existing of existingSessions) {
+        if (!existing) continue;
         let browserAlive = false;
         try { ab('get url', { session: existing.sessionName, timeoutMs: 5000 }); browserAlive = true; } catch { /* stale browser */ }
         const serverAlive = existing.serverProcess
           ? processIdentityMatches(getProcessIdentity(existing.serverProcess.pid), existing.serverProcess)
           : false;
         if (browserAlive || serverAlive) {
+          releaseStartLock();
           console.error(chalk.red('✗') + ' Refusing --force because lifecycle checks still find owned session resources. Run "proofshot stop" first.');
           process.exit(1);
         }
       }
-      clearSession(outputDir);
+      for (const root of activeSessionRoots) clearSession(root);
       console.log(chalk.yellow('⚠') + chalk.dim(' Cleared a session after proving its browser and owned server were stale'));
     } else {
       console.log(
         chalk.yellow('⚠ A session is already active.') +
           chalk.dim(' Run "proofshot stop" first, or use --force to override.'),
       );
-      return;
+      releaseStartLock();
+      process.exitCode = 1;
+      return false;
     }
   }
 
@@ -164,8 +189,11 @@ export async function startCommand(options: StartOptions): Promise<void> {
         console.error(chalk.red('✗') + ` Startup rollback could not stop the server: ${error instanceof Error ? error.message : error}`);
       }
     }
-    clearSession(outputDir);
+    for (const root of sessionRoots) {
+      try { clearSession(root); } catch { /* continue releasing other state */ }
+    }
     try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch { /* retain partial diagnostics if removal fails */ }
+    try { releaseStartLock(); } catch { /* process exit will leave a recoverable stale claim */ }
   };
 
   if (options.run) {
@@ -246,36 +274,42 @@ export async function startCommand(options: StartOptions): Promise<void> {
     process.exit(1);
   }
 
-  saveSession({
-    schemaVersion: 2,
-    ownershipToken,
-    startedAt: new Date().toISOString(),
-    description: options.description || null,
-    outputDir,
-    sessionDir,
-    sessionName,
-    videoPath,
-    serverErrorLog,
-    port: config.devServer.port,
-    serverCommand: options.run || null,
-    serverAlreadyRunning,
-    serverPumpPid,
-    serverProcess,
-    recordingActive: true,
-    viewport: { width: config.viewport.width, height: config.viewport.height },
-    initialViewport: { width: config.viewport.width, height: config.viewport.height },
-    viewportChanges: [],
-    headless: config.headless,
-    deviceScaleFactor: readBrowserNumber('window.devicePixelRatio', sessionName) ?? 1,
-    browserVersion: readBrowserString('navigator.userAgent', sessionName),
-    agentBrowserVersion: readAgentBrowserVersion(),
-    proofshotCommit: PROOFSHOT_COMMIT,
-  });
+  try {
+    saveSession({
+      schemaVersion: 2,
+      ownershipToken,
+      startedAt: new Date().toISOString(),
+      description: options.description || null,
+      outputDir,
+      sessionDir,
+      sessionName,
+      videoPath,
+      serverErrorLog,
+      port: config.devServer.port,
+      serverCommand: options.run || null,
+      serverAlreadyRunning,
+      serverPumpPid,
+      serverProcess,
+      recordingActive: true,
+      viewport: { width: config.viewport.width, height: config.viewport.height },
+      initialViewport: { width: config.viewport.width, height: config.viewport.height },
+      viewportChanges: [],
+      headless: config.headless,
+      deviceScaleFactor: readBrowserNumber('window.devicePixelRatio', sessionName) ?? 1,
+      browserVersion: readBrowserString('navigator.userAgent', sessionName),
+      agentBrowserVersion: readAgentBrowserVersion(),
+      proofshotCommit: PROOFSHOT_COMMIT,
+    });
 
-  // `exec`/`stop` look in the configured output dir. If --output moved this
-  // session elsewhere, leave a breadcrumb there so they can still find it.
-  if (options.output) {
-    writeSessionPointer(defaultOutputDir, outputDir);
+    // `exec`/`stop` look in the configured output dir. If --output moved this
+    // session elsewhere, leave a breadcrumb there so they can still find it.
+    if (options.output) {
+      writeSessionPointer(defaultOutputDir, outputDir);
+    }
+  } catch (error) {
+    await rollback();
+    console.error(chalk.red('✗') + ` Failed to save session state: ${error instanceof Error ? error.message : error}`);
+    process.exit(1);
   }
 
   console.log('');
@@ -299,6 +333,8 @@ export async function startCommand(options: StartOptions): Promise<void> {
   console.log(chalk.dim('  proofshot exec screenshot step.png    # Capture a moment'));
   console.log('');
   console.log(`When done, run: ${chalk.white('proofshot stop')}`);
+  releaseStartLock();
+  return true;
 }
 
 function parseBrowserValue(raw: string): unknown {
@@ -311,14 +347,14 @@ function parseBrowserValue(raw: string): unknown {
 
 function readBrowserString(expression: string, sessionName: string): string | null {
   try {
-    const value = parseBrowserValue(ab(`eval ${JSON.stringify(expression)}`, { session: sessionName }));
+    const value = parseBrowserValue(abArgs(['eval', expression], { session: sessionName }));
     return typeof value === 'string' ? value : null;
   } catch { return null; }
 }
 
 function readBrowserNumber(expression: string, sessionName: string): number | null {
   try {
-    const value = parseBrowserValue(ab(`eval ${JSON.stringify(expression)}`, { session: sessionName }));
+    const value = parseBrowserValue(abArgs(['eval', expression], { session: sessionName }));
     return typeof value === 'number' && Number.isFinite(value) ? value : null;
   } catch { return null; }
 }

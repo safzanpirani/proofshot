@@ -26,6 +26,126 @@ interface PROptions {
   allowDirty?: boolean;
 }
 
+export type VerificationStatus = 'passed' | 'failed' | 'unknown';
+
+export interface SessionVerificationResult {
+  status: VerificationStatus;
+  errorCount: number;
+  assertionFailureCount: number;
+  failedActionCount: number;
+  reasons: string[];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function nonNegativeInteger(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+/** Read the machine-readable verification result without inferring status from prose. */
+export function readSessionVerificationResult(sessionDir: string): SessionVerificationResult {
+  const resultPath = path.join(sessionDir, 'result.json');
+  const unknown = (reason: string): SessionVerificationResult => ({
+    status: 'unknown',
+    errorCount: 0,
+    assertionFailureCount: 0,
+    failedActionCount: 0,
+    reasons: [reason],
+  });
+
+  if (!fs.existsSync(resultPath)) {
+    return unknown('Structured result.json is missing. This session may predate structured verification results.');
+  }
+
+  let value: unknown;
+  try {
+    value = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+  } catch (error) {
+    return unknown(`Structured result.json is invalid: ${error instanceof Error ? error.message : error}`);
+  }
+  if (!isRecord(value)) return unknown('Structured result.json does not contain an object.');
+
+  const assertionsAreValid = Array.isArray(value.assertions) && value.assertions.every(
+    (assertion) => isRecord(assertion) && typeof assertion.passed === 'boolean',
+  );
+  const assertions = Array.isArray(value.assertions) ? value.assertions : [];
+  const assertionFailureCount = assertions.filter(
+    (assertion) => !isRecord(assertion) || assertion.passed !== true,
+  ).length;
+  const consoleResult = isRecord(value.console) ? nonNegativeInteger(value.console.errorCount) : null;
+  const serverResult = isRecord(value.server) ? nonNegativeInteger(value.server.errorCount) : null;
+  const actionsResult = isRecord(value.actions) ? nonNegativeInteger(value.actions.failedCount) : null;
+  const sessionLogResult = isRecord(value.sessionLog) ? value.sessionLog : null;
+  const malformedLinesValue = sessionLogResult?.malformedLines;
+  const malformedLines = Array.isArray(malformedLinesValue) && malformedLinesValue.every(
+    (line) => typeof line === 'number' && Number.isInteger(line) && line >= 1,
+  ) ? malformedLinesValue as number[] : null;
+  const errorCount = (consoleResult || 0) + (serverResult || 0);
+  const failedActionCount = actionsResult || 0;
+  const reasonsAreValid = Array.isArray(value.incompleteReasons) && value.incompleteReasons.every(
+    (reason) => typeof reason === 'string',
+  );
+  const reasons = Array.isArray(value.incompleteReasons)
+    ? value.incompleteReasons.filter((reason): reason is string => typeof reason === 'string' && reason.length > 0)
+    : [];
+  if (malformedLines && malformedLines.length > 0 && !reasons.some((reason) => /malformed JSONL/i.test(reason))) {
+    reasons.push(`Session action log contains malformed JSONL at line(s) ${malformedLines.join(', ')}`);
+  }
+  if (value.evidenceComplete === false && reasons.length === 0) {
+    reasons.push('Structured result.json marks the evidence as incomplete.');
+  }
+  const knownFailure =
+    assertionFailureCount > 0 ||
+    value.assertionsPassed === false ||
+    value.evidenceComplete === false ||
+    errorCount > 0 ||
+    failedActionCount > 0 ||
+    reasons.length > 0 ||
+    Boolean(malformedLines && malformedLines.length > 0);
+
+  if (value.schemaVersion !== 2) {
+    return {
+      status: knownFailure ? 'failed' : 'unknown',
+      errorCount,
+      assertionFailureCount,
+      failedActionCount,
+      reasons: [
+        ...reasons,
+        'Legacy result format cannot prove that all evidence and action records were complete.',
+      ],
+    };
+  }
+
+  const schemaIsComplete =
+    typeof value.assertionsPassed === 'boolean' &&
+    typeof value.evidenceComplete === 'boolean' &&
+    assertionsAreValid &&
+    reasonsAreValid &&
+    consoleResult !== null &&
+    serverResult !== null &&
+    actionsResult !== null &&
+    malformedLines !== null;
+  if (!schemaIsComplete) {
+    return {
+      status: knownFailure ? 'failed' : 'unknown',
+      errorCount,
+      assertionFailureCount,
+      failedActionCount,
+      reasons: [...reasons, 'Structured result.json is missing required verification fields.'],
+    };
+  }
+
+  return {
+    status: knownFailure ? 'failed' : 'passed',
+    errorCount,
+    assertionFailureCount,
+    failedActionCount,
+    reasons,
+  };
+}
+
 export async function prCommand(options: PROptions): Promise<void> {
   const config = loadConfig();
   const outputDir = path.resolve(config.output);
@@ -91,6 +211,10 @@ export async function prCommand(options: PROptions): Promise<void> {
   const screenshotPaths: string[] = [];
   let videoPath: string | null = null;
   let errorCount = 0;
+  let assertionFailureCount = 0;
+  let failedActionCount = 0;
+  const verificationStatuses: VerificationStatus[] = [];
+  const incompleteReasons: string[] = [];
   let latestCommitSha = '';
   let description: string | null = null;
 
@@ -120,19 +244,21 @@ export async function prCommand(options: PROptions): Promise<void> {
       }
     }
 
-    // Count errors from SUMMARY.md
-    const summaryPath = path.join(sessionDir, 'SUMMARY.md');
-    if (fs.existsSync(summaryPath)) {
-      const summary = fs.readFileSync(summaryPath, 'utf-8');
-      const errorMatch = summary.match(/(\d+)\s+error/gi);
-      if (errorMatch) {
-        for (const m of errorMatch) {
-          const num = parseInt(m, 10);
-          if (!isNaN(num)) errorCount += num;
-        }
-      }
-    }
+    const verification = readSessionVerificationResult(sessionDir);
+    verificationStatuses.push(verification.status);
+    errorCount += verification.errorCount;
+    assertionFailureCount += verification.assertionFailureCount;
+    failedActionCount += verification.failedActionCount;
+    incompleteReasons.push(
+      ...verification.reasons.map((reason) => `${path.basename(sessionDir)}: ${reason}`),
+    );
   }
+
+  const verificationStatus: VerificationStatus = verificationStatuses.includes('failed')
+    ? 'failed'
+    : verificationStatuses.includes('unknown')
+      ? 'unknown'
+      : 'passed';
 
   // 4. Convert .webm → .mp4 if ffmpeg is available
   if (videoPath && videoPath.endsWith('.webm')) {
@@ -141,16 +267,21 @@ export async function prCommand(options: PROptions): Promise<void> {
       videoPath = mp4Path;
     } else {
       try {
-        execSync('ffmpeg -version', { stdio: 'pipe' });
+        execFileSync('ffmpeg', ['-version'], { stdio: 'pipe' });
         console.log(chalk.dim('Converting video to .mp4...'));
-        execSync(
-          `ffmpeg -i "${videoPath}" -c:v libx264 -preset fast -crf 23 -an "${mp4Path}"`,
-          { stdio: 'pipe', timeout: 120000 },
-        );
+        execFileSync('ffmpeg', [
+          '-i', videoPath,
+          '-c:v', 'libx264',
+          '-preset', 'fast',
+          '-crf', '23',
+          '-an',
+          mp4Path,
+        ], { stdio: 'pipe', timeout: 120000 });
         videoPath = mp4Path;
         console.log(chalk.green('✓') + ' Video converted to .mp4');
       } catch {
-        console.log(chalk.dim('ffmpeg not available — uploading .webm directly'));
+        if (fs.existsSync(mp4Path)) fs.unlinkSync(mp4Path);
+        console.log(chalk.dim('Video conversion unavailable — uploading .webm directly'));
       }
     }
   }
@@ -174,6 +305,10 @@ export async function prCommand(options: PROptions): Promise<void> {
           }
         : null,
       errorCount,
+      verificationStatus,
+      assertionFailureCount,
+      failedActionCount,
+      incompleteReasons,
       branch,
       commitSha: latestCommitSha,
     };
@@ -242,20 +377,17 @@ export async function prCommand(options: PROptions): Promise<void> {
   }
 
   if (failedUploads > 0) {
-    console.log(chalk.yellow(`⚠ ${failedUploads} artifact(s) failed to upload`));
-  }
-
-  if (filesToUpload.length > 0 && uploaded.size === 0) {
     console.error(
       chalk.red('✗') +
-        ' All artifact uploads failed. PR comment was not posted.\n' +
+        ` ${failedUploads} of ${filesToUpload.length} artifact upload(s) failed. PR comment was not posted.\n` +
         chalk.dim(
           uploadProvider === 'github-web-attachments'
             ? 'Retry with "proofshot pr --upload-provider repo-contents" or use "proofshot pr --dry-run".'
             : 'Retry with "proofshot pr --dry-run" to inspect the generated markdown.',
         ),
     );
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
 
   // 9. Generate and post PR comment
@@ -265,6 +397,10 @@ export async function prCommand(options: PROptions): Promise<void> {
     screenshots: screenshotMap,
     video,
     errorCount,
+    verificationStatus,
+    assertionFailureCount,
+    failedActionCount,
+    incompleteReasons,
     branch,
     commitSha: latestCommitSha,
   };
@@ -299,9 +435,8 @@ function buildUploadRoot(branch: string, prNumber: number, commitSha: string): s
 }
 
 function normalizeUploadProvider(provider?: string): GitHubUploadProvider {
-  if (!provider || provider === 'repo-contents' || provider === 'github-web-attachments') {
-    return provider || 'repo-contents';
-  }
+  if (provider === undefined) return 'repo-contents';
+  if (provider === 'repo-contents' || provider === 'github-web-attachments') return provider;
 
   console.error(
     chalk.red('✗') +

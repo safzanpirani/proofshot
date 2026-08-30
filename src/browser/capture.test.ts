@@ -3,10 +3,10 @@ import * as os from 'os';
 import * as path from 'path';
 import { describe, expect, it, vi } from 'vitest';
 import { PNG } from 'pngjs';
-import { diffScreenshots, stopRecording } from './capture.js';
+import { diffScreenshots, stopRecording, takeScreenshot } from './capture.js';
 
-const mocks = vi.hoisted(() => ({ ab: vi.fn() }));
-vi.mock('../utils/exec.js', () => ({ ab: mocks.ab }));
+const mocks = vi.hoisted(() => ({ abArgs: vi.fn() }));
+vi.mock('../utils/exec.js', () => ({ abArgs: mocks.abArgs }));
 
 function writePng(filePath: string, color: [number, number, number, number]): void {
   const png = new PNG({ width: 2, height: 2 });
@@ -38,9 +38,17 @@ describe('diffScreenshots', () => {
 describe('stopRecording', () => {
   it('allows slow browser video finalization to complete', () => {
     stopRecording('proofshot-test');
-    expect(mocks.ab).toHaveBeenCalledWith('record stop', {
+    expect(mocks.abArgs).toHaveBeenCalledWith(['record', 'stop'], {
       timeoutMs: 120000,
       session: 'proofshot-test',
     });
+  });
+
+  it('passes screenshot paths as one argument', () => {
+    takeScreenshot('C:\\Proof Shots\\step & one.png', true, 'proofshot-test');
+    expect(mocks.abArgs).toHaveBeenCalledWith(
+      ['screenshot', 'C:\\Proof Shots\\step & one.png', '--full'],
+      { timeoutMs: 15000, session: 'proofshot-test' },
+    );
   });
 });

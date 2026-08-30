@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { randomUUID } from 'crypto';
 import { writeFileAtomic, writeJsonAtomic } from '../utils/atomic.js';
 
 const SESSION_FILENAME = '.session.json';
@@ -9,6 +10,12 @@ const SESSION_FILENAME = '.session.json';
  * directory, silently miss the session, and leave a 0-byte recording behind.
  */
 const SESSION_POINTER_FILENAME = '.session-location';
+const SESSION_START_LOCK_FILENAME = '.session-start.lock';
+
+export interface SessionStartLock {
+  path: string;
+  token: string;
+}
 
 export interface SessionState {
   schemaVersion: 2;
@@ -46,6 +53,59 @@ export class InvalidSessionStateError extends Error {
   constructor(public readonly sessionPath: string, message: string) {
     super(`Invalid ProofShot session state at ${sessionPath}: ${message}`);
     this.name = 'InvalidSessionStateError';
+  }
+}
+
+function processIsAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+}
+
+/** Claim the default session root before checking or creating session state. */
+export function acquireSessionStartLock(outputDir: string): SessionStartLock {
+  fs.mkdirSync(outputDir, { recursive: true });
+  const lockPath = path.join(outputDir, SESSION_START_LOCK_FILENAME);
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const token = randomUUID();
+    try {
+      const descriptor = fs.openSync(lockPath, 'wx', 0o600);
+      try {
+        fs.writeFileSync(descriptor, JSON.stringify({ pid: process.pid, token, createdAt: new Date().toISOString() }) + '\n');
+      } finally {
+        fs.closeSync(descriptor);
+      }
+      return { path: lockPath, token };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      let owner: { pid?: unknown; token?: unknown } = {};
+      try {
+        owner = JSON.parse(fs.readFileSync(lockPath, 'utf-8')) as { pid?: unknown; token?: unknown };
+      } catch { /* malformed lock is stale */ }
+      if (typeof owner.pid === 'number' && processIsAlive(owner.pid)) {
+        throw new Error(`Another ProofShot start is already running with PID ${owner.pid}`);
+      }
+      try { fs.unlinkSync(lockPath); } catch (unlinkError) {
+        if ((unlinkError as NodeJS.ErrnoException).code !== 'ENOENT') throw unlinkError;
+      }
+    }
+  }
+
+  throw new Error('Could not acquire the ProofShot session start lock');
+}
+
+/** Release only the exact start claim acquired by this process. */
+export function releaseSessionStartLock(lock: SessionStartLock): void {
+  try {
+    const owner = JSON.parse(fs.readFileSync(lock.path, 'utf-8')) as { token?: unknown };
+    if (owner.token === lock.token) fs.unlinkSync(lock.path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
 }
 

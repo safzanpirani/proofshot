@@ -5,7 +5,10 @@ import { describe, expect, it } from 'vitest';
 import {
   buildShellCommand,
   describeSelectorSyntaxError,
+  formatLoggedAction,
+  readSessionLog,
   materializeCurlInput,
+  resolveScreenshotPath,
 } from './exec.js';
 
 describe('buildShellCommand', () => {
@@ -55,6 +58,67 @@ describe('materializeCurlInput', () => {
       fs.closeSync(sourceFd);
       fs.rmSync(sourceDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('session log safety', () => {
+  it('redacts values entered by fill and type actions', () => {
+    expect(formatLoggedAction(['fill', '@e2', 'hunter2 with spaces'])).toBe(
+      'fill @e2 [REDACTED]',
+    );
+    expect(formatLoggedAction(['type', 'private message'])).toBe('type [REDACTED]');
+    expect(formatLoggedAction(['type', '@e4', 'private message'])).toBe(
+      'type @e4 [REDACTED]',
+    );
+  });
+
+  it('retains valid JSONL records and reports malformed lines', () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'proofshot-jsonl-test-'));
+    fs.writeFileSync(path.join(directory, 'session-log.jsonl'), [
+      JSON.stringify({ action: 'first', success: true }),
+      '{"action":"torn',
+      JSON.stringify({ action: 'third', success: false }),
+      '',
+    ].join('\n'));
+
+    const result = readSessionLog(directory);
+    expect(result.entries.map((entry) => entry.action)).toEqual(['first', 'third']);
+    expect(result.malformedLines).toEqual([2]);
+  });
+});
+
+describe('resolveScreenshotPath', () => {
+  it('does not rewrite the screenshot command when only flags are present', () => {
+    expect(resolveScreenshotPath(['screenshot', '--full'], '/tmp/proofshot-session')).toEqual([
+      'screenshot',
+      '--full',
+    ]);
+    expect(resolveScreenshotPath(['screenshot', '--viewport-only'], '/tmp/proofshot-session')).toEqual([
+      'screenshot',
+    ]);
+    expect(resolveScreenshotPath(
+      ['screenshot', '--screenshot-format', 'jpeg', '--screenshot-quality', '80'],
+      '/tmp/proofshot-session',
+    )).toEqual([
+      'screenshot',
+      '--screenshot-format',
+      'jpeg',
+      '--screenshot-quality',
+      '80',
+      '--full',
+    ]);
+  });
+
+  it('resolves a relative screenshot path without changing flags', () => {
+    expect(resolveScreenshotPath(
+      ['screenshot', 'step one.png', '--annotate'],
+      '/tmp/proofshot-session',
+    )).toEqual([
+      'screenshot',
+      '/tmp/proofshot-session/step one.png',
+      '--annotate',
+      '--full',
+    ]);
   });
 });
 

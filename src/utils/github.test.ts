@@ -54,11 +54,58 @@ describe('formatPRComment', () => {
         renderMode: 'link',
       },
       errorCount: 0,
+      verificationStatus: 'passed',
+      assertionFailureCount: 0,
+      failedActionCount: 0,
+      incompleteReasons: [],
       branch: 'feature/test',
       commitSha: 'abcdef123456',
     });
 
     expect(body).toContain('[Session recording](https://example.com/session.mp4)');
     expect(body).not.toContain('\nhttps://example.com/session.mp4\n');
+  });
+
+  it('reports assertion and evidence failures instead of a green no-error status', () => {
+    const body = formatPRComment({
+      description: null,
+      sessionCount: 1,
+      screenshots: new Map(),
+      video: null,
+      errorCount: 0,
+      verificationStatus: 'failed',
+      assertionFailureCount: 1,
+      failedActionCount: 2,
+      incompleteReasons: ['session: Video file was not produced'],
+      branch: 'feature/test',
+      commitSha: 'abcdef123456',
+    });
+
+    expect(body).toContain('❌ Verification failed');
+    expect(body).toContain('1 assertion failure(s)');
+    expect(body).toContain('2 failed action(s)');
+    expect(body).toContain('Video file was not produced');
+    expect(body).not.toContain('No errors detected');
+  });
+
+  it('escapes untrusted descriptions, evidence reasons, and screenshot labels', () => {
+    const body = formatPRComment({
+      description: '</blockquote>\n## forged success',
+      sessionCount: 1,
+      screenshots: new Map([['step-](javascript:alert(1)).png', 'https://example.com/image.png']]),
+      video: null,
+      errorCount: 0,
+      verificationStatus: 'failed',
+      assertionFailureCount: 0,
+      failedActionCount: 0,
+      incompleteReasons: ['</li>\n## forged evidence'],
+      branch: 'feature/test',
+      commitSha: 'abcdef123456',
+    });
+
+    expect(body).not.toContain('</blockquote>');
+    expect(body).not.toContain('\n## forged');
+    expect(body).not.toContain('](javascript:');
+    expect(body).toContain('&lt;/blockquote&gt;');
   });
 });

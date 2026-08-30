@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { findConfigPathMock, loadConfigMock, loadSessionMock, findExecutablePathMock, readCommandVersionMock } =
   vi.hoisted(() => ({
@@ -27,6 +27,7 @@ import { doctorCommand } from './doctor.js';
 
 describe('doctorCommand', () => {
   beforeEach(() => {
+    process.exitCode = undefined;
     vi.restoreAllMocks();
     findConfigPathMock.mockReturnValue('/tmp/proofshot.config.json');
     loadConfigMock.mockReturnValue({
@@ -45,6 +46,10 @@ describe('doctorCommand', () => {
     );
   });
 
+  afterEach(() => {
+    process.exitCode = undefined;
+  });
+
   it('prints a diagnostic summary for the current environment', async () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
@@ -58,5 +63,19 @@ describe('doctorCommand', () => {
     expect(output).toContain('proofshot-artifacts');
     expect(output).toContain('✓ no active session');
     expect(readCommandVersionMock).toHaveBeenCalledWith('ffmpeg', ['-version']);
+  });
+
+  it('returns a failure status when required runtime tooling is unavailable', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    findExecutablePathMock.mockImplementation((name: string) =>
+      name === 'ffmpeg' ? '/opt/homebrew/bin/ffmpeg' : null,
+    );
+    readCommandVersionMock.mockImplementation((name: string) =>
+      name === 'ffmpeg' ? 'ffmpeg version 7.0' : null,
+    );
+
+    await doctorCommand({ json: true });
+
+    expect(process.exitCode).toBe(1);
   });
 });

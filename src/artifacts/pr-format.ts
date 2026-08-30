@@ -67,8 +67,21 @@ export interface PRCommentData {
   screenshots: Map<string, string>; // filename → GitHub asset URL
   video: { url: string; renderMode: 'embed' | 'link' } | null;
   errorCount: number;
+  verificationStatus: 'passed' | 'failed' | 'unknown';
+  assertionFailureCount: number;
+  failedActionCount: number;
+  incompleteReasons: string[];
   branch: string;
   commitSha: string;
+}
+
+function escapeMarkdownText(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/([\\`*_[\]{}()#+\-.!|])/g, '\\$1')
+    .replace(/\r?\n/g, ' ');
 }
 
 /**
@@ -79,15 +92,27 @@ export function formatPRComment(data: PRCommentData): string {
   let md = `## ProofShot Verification\n\n`;
 
   if (data.description) {
-    md += `> ${data.description}\n\n`;
+    md += `> ${escapeMarkdownText(data.description)}\n\n`;
   }
 
-  // Status
-  const status =
-    data.errorCount === 0
-      ? '✅ No errors detected'
-      : `⚠️ ${data.errorCount} error(s) detected`;
+  const status = data.verificationStatus === 'passed'
+    ? '✅ Verification passed'
+    : data.verificationStatus === 'failed'
+      ? '❌ Verification failed'
+      : '⚠️ Verification status unknown';
   md += `${status}\n\n`;
+
+  const failureCounts: string[] = [];
+  if (data.errorCount > 0) failureCounts.push(`${data.errorCount} console/server error(s)`);
+  if (data.assertionFailureCount > 0) failureCounts.push(`${data.assertionFailureCount} assertion failure(s)`);
+  if (data.failedActionCount > 0) failureCounts.push(`${data.failedActionCount} failed action(s)`);
+  if (failureCounts.length > 0) md += `**Failures:** ${failureCounts.join(' · ')}\n\n`;
+
+  if (data.incompleteReasons.length > 0) {
+    md += `**Evidence issues:**\n\n`;
+    for (const reason of data.incompleteReasons) md += `- ${escapeMarkdownText(reason)}\n`;
+    md += '\n';
+  }
 
   // Video (GitHub renders video URLs as playable embeds)
   if (data.video) {
@@ -106,14 +131,16 @@ export function formatPRComment(data: PRCommentData): string {
     if (data.screenshots.size <= 3) {
       for (const [filename, url] of data.screenshots) {
         const label = filename.replace(/\.png$/, '').replace(/^step-/, '');
-        md += `**${label}**\n\n`;
-        md += `![${label}](${url})\n\n`;
+        const escapedLabel = escapeMarkdownText(label);
+        md += `**${escapedLabel}**\n\n`;
+        md += `![${escapedLabel}](${url})\n\n`;
       }
     } else {
       md += `<details>\n<summary>View ${data.screenshots.size} screenshots</summary>\n\n`;
       for (const [filename, url] of data.screenshots) {
         const label = filename.replace(/\.png$/, '').replace(/^step-/, '');
-        md += `**${label}**\n\n![${label}](${url})\n\n`;
+        const escapedLabel = escapeMarkdownText(label);
+        md += `**${escapedLabel}**\n\n![${escapedLabel}](${url})\n\n`;
       }
       md += `</details>\n\n`;
     }
@@ -122,9 +149,9 @@ export function formatPRComment(data: PRCommentData): string {
   // Footer
   md += `---\n`;
   md += `<sub>`;
-  md += `Branch: \`${data.branch}\``;
+  md += `Branch: ${escapeMarkdownText(data.branch)}`;
   if (data.commitSha) {
-    md += ` · Commit: \`${data.commitSha.slice(0, 7)}\``;
+    md += ` · Commit: ${escapeMarkdownText(data.commitSha.slice(0, 7))}`;
   }
   md += ` · ${data.sessionCount} session(s)`;
   md += `</sub>\n`;

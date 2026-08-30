@@ -41,6 +41,18 @@ describe('loadConfig', () => {
     });
   });
 
+  it('resolves relative output paths from the directory containing proofshot.config.json', () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'proofshot-output-config-path-'));
+    const nestedDir = path.join(projectDir, 'src', 'nested');
+    fs.mkdirSync(nestedDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDir, 'proofshot.config.json'),
+      JSON.stringify({ output: './artifacts/proofshot' }),
+    );
+
+    expect(loadConfig(nestedDir).output).toBe(path.join(projectDir, 'artifacts', 'proofshot'));
+  });
+
   it('fails with the config path when JSON is malformed', () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'proofshot-invalid-json-'));
     fs.writeFileSync(path.join(tempDir, 'proofshot.config.json'), '{ invalid');

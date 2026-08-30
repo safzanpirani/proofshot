@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildOpenBrowserCommand } from './session.js';
+import { buildOpenBrowserArgs, buildOpenBrowserCommand } from './session.js';
 
 describe('buildOpenBrowserCommand', () => {
   it('builds a default open command without extra flags', () => {
@@ -21,5 +21,19 @@ describe('buildOpenBrowserCommand', () => {
     ).toBe(
       'open https://localhost:3000 --ignore-https-errors --executable-path "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"',
     );
+  });
+
+  it('keeps URLs and executable paths as exact argv values', () => {
+    expect(buildOpenBrowserArgs('https://example.test/a b?x=1&y=2', false, {
+      ignoreHttpsErrors: true,
+      executablePath: 'C:\\Program Files\\Google\\Chrome.exe',
+    })).toEqual([
+      'open',
+      'https://example.test/a b?x=1&y=2',
+      '--headed',
+      '--ignore-https-errors',
+      '--executable-path',
+      'C:\\Program Files\\Google\\Chrome.exe',
+    ]);
   });
 });

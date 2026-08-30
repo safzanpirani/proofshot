@@ -27,6 +27,9 @@ export async function doctorCommand(options: { json?: boolean } = {}): Promise<v
   const ffmpegPath = findExecutablePath('ffmpeg');
   const agentBrowserVersion = readCommandVersion('agent-browser');
   const ffmpegVersion = readCommandVersion('ffmpeg', ['-version']);
+  const agentBrowserHealthy = Boolean(agentBrowserPath && agentBrowserVersion);
+  const ffmpegHealthy = Boolean(ffmpegPath && ffmpegVersion);
+  if (!agentBrowserHealthy || !ffmpegHealthy) process.exitCode = 1;
   const skills = ['claude', 'codex'].map((agent) => {
     const installedPath = path.join(os.homedir(), `.${agent}`, 'skills', 'proofshot', 'SKILL.md');
     const expectedHash = hash(getCanonicalSkillContent(agent));
@@ -59,12 +62,12 @@ export async function doctorCommand(options: { json?: boolean } = {}): Promise<v
   printLine('Viewport', `${config.viewport.width}x${config.viewport.height}`);
   console.log('');
 
-  console.log(statusLabel(Boolean(agentBrowserPath), 'agent-browser'));
+  console.log(statusLabel(agentBrowserHealthy, 'agent-browser'));
   printLine('Path', agentBrowserPath || chalk.dim('not found'));
   printLine('Version', agentBrowserVersion || chalk.dim('not available'));
   console.log('');
 
-  console.log(statusLabel(Boolean(ffmpegPath), 'ffmpeg'));
+  console.log(statusLabel(ffmpegHealthy, 'ffmpeg'));
   printLine('Path', ffmpegPath || chalk.dim('not found'));
   printLine('Version', ffmpegVersion || chalk.dim('not available'));
   console.log('');

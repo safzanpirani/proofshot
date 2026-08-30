@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import type { SessionLogEntry } from '../commands/exec.js';
+import { readSessionLog, type SessionLogEntry } from '../commands/exec.js';
 
 export interface TimestampedLogEntry {
   text: string;
@@ -125,10 +125,15 @@ function escapeHtml(str: string): string {
 }
 
 /**
- * Serialize session log entries to a JSON string safe for embedding in HTML <script>.
+ * Serialize data for an inline script without allowing data to end the script element.
  */
-function serializeEntries(entries: SessionLogEntry[]): string {
-  return JSON.stringify(entries).replace(/<\//g, '<\\/');
+function serializeForScript(value: unknown): string {
+  return JSON.stringify(value)
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e')
+    .replace(/&/g, '\\u0026')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
 }
 
 /**
@@ -185,7 +190,7 @@ export function generateViewer(data: ViewerData): string {
   const hasVideo = !!data.videoFilename;
 
   // Build marker data for the scrub bar
-  const markersJson = JSON.stringify(
+  const markersJson = serializeForScript(
     data.entries.map((entry, i) => ({
       time: entry.relativeTimeSec,
       icon: getActionIcon(entry.action),
@@ -221,7 +226,7 @@ export function generateViewer(data: ViewerData): string {
       </div>`
     : `<div class="no-video"><p>No video recorded</p><p class="no-video-hint">Screenshots are available in the timeline</p></div>`;
 
-  const entriesJson = serializeEntries(data.entries);
+  const entriesJson = serializeForScript(data.entries);
 
   // Prepare log content for embedding — prefer timestamped entries for video sync
   let consoleLogBodyHtml: string;
@@ -1312,7 +1317,14 @@ ${stepsHtml}
         const m = markers[idx];
         if (!m || !scrubTooltip) return;
         const action = m.action.length > 40 ? m.action.slice(0, 40) + '\\u2026' : m.action;
-        scrubTooltip.innerHTML = '<span class="tooltip-icon">' + m.icon + '</span>' + action + '<span class="tooltip-time">' + formatTimeFn(m.time) + '</span>';
+        const icon = document.createElement('span');
+        icon.className = 'tooltip-icon';
+        icon.textContent = m.icon;
+        const actionText = document.createTextNode(action);
+        const time = document.createElement('span');
+        time.className = 'tooltip-time';
+        time.textContent = formatTimeFn(m.time);
+        scrubTooltip.replaceChildren(icon, actionText, time);
         scrubTooltip.style.display = 'block';
 
         const trackRect = scrubTrack.getBoundingClientRect();
@@ -1457,12 +1469,20 @@ export function writeViewer(
   // Load session log if entries not provided
   let entries = data.entries;
   if (!entries) {
-    const logPath = path.join(outputDir, 'session-log.json');
-    if (!fs.existsSync(logPath)) return null;
-    try {
-      entries = JSON.parse(fs.readFileSync(logPath, 'utf-8'));
-    } catch {
-      return null;
+    const currentLogPath = path.join(outputDir, 'session-log.jsonl');
+    if (fs.existsSync(currentLogPath)) {
+      entries = readSessionLog(outputDir).entries;
+    } else {
+      // Sessions recorded before the JSONL format used a single JSON array.
+      const legacyLogPath = path.join(outputDir, 'session-log.json');
+      if (!fs.existsSync(legacyLogPath)) return null;
+      try {
+        const legacyEntries: unknown = JSON.parse(fs.readFileSync(legacyLogPath, 'utf-8'));
+        if (!Array.isArray(legacyEntries)) return null;
+        entries = legacyEntries as SessionLogEntry[];
+      } catch {
+        return null;
+      }
     }
   }
 

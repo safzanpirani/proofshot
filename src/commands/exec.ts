@@ -1,9 +1,8 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { execSync } from 'child_process';
 import { loadConfig } from '../utils/config.js';
-import { ab, buildAgentBrowserCommand, setAgentBrowserDefaults } from '../utils/exec.js';
+import { abArgs, buildAgentBrowserCommand, setAgentBrowserDefaults } from '../utils/exec.js';
 import { loadSession, saveSession, type SessionState } from '../session/state.js';
 import { writeJsonAtomic } from '../utils/atomic.js';
 
@@ -29,31 +28,65 @@ export interface SessionLogEntry {
   };
 }
 
+export interface SessionLogReadResult {
+  entries: SessionLogEntry[];
+  malformedLines: number[];
+}
+
+/** Read all complete JSONL records and report malformed lines by 1-based line number. */
+export function readSessionLog(sessionDir: string): SessionLogReadResult {
+  const logPath = path.join(sessionDir, SESSION_LOG_FILENAME);
+  if (!fs.existsSync(logPath)) return { entries: [], malformedLines: [] };
+
+  const entries: SessionLogEntry[] = [];
+  const malformedLines: number[] = [];
+  const lines = fs.readFileSync(logPath, 'utf-8').split('\n');
+  lines.forEach((line, index) => {
+    if (!line.trim()) return;
+    try {
+      entries.push(JSON.parse(line) as SessionLogEntry);
+    } catch {
+      malformedLines.push(index + 1);
+    }
+  });
+  return { entries, malformedLines };
+}
+
 /**
  * Load existing session log entries from disk.
  */
 export function loadSessionLog(sessionDir: string): SessionLogEntry[] {
-  const logPath = path.join(sessionDir, SESSION_LOG_FILENAME);
-  if (!fs.existsSync(logPath)) return [];
-  try {
-    return fs.readFileSync(logPath, 'utf-8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
-  } catch {
-    return [];
-  }
+  return readSessionLog(sessionDir).entries;
 }
 
 /**
  * For screenshot commands, resolve relative paths into the session directory
  * so agents can just say `proofshot exec screenshot step-name.png`.
  */
-function resolveScreenshotPath(args: string[], sessionDir: string): string[] {
+export function resolveScreenshotPath(args: string[], sessionDir: string): string[] {
   if (args[0] !== 'screenshot' || args.length < 2) return args;
 
   const viewportOnly = args.includes('--viewport-only');
   const normalized = args.filter((arg) => arg !== '--viewport-only');
-  const screenshotPath = [...normalized].reverse().find((arg) => !arg.startsWith('-'))!;
-  // If it's already absolute, leave it alone
   const withMode = viewportOnly || normalized.includes('--full') ? normalized : [...normalized, '--full'];
+  const optionsWithValues = new Set([
+    '--screenshot-dir',
+    '--screenshot-format',
+    '--screenshot-quality',
+  ]);
+  const positional: string[] = [];
+  for (let index = 1; index < normalized.length; index += 1) {
+    const arg = normalized[index];
+    if (optionsWithValues.has(arg)) {
+      index += 1;
+      continue;
+    }
+    if (!arg.startsWith('-')) positional.push(arg);
+  }
+  const screenshotPath = positional.at(-1);
+  if (!screenshotPath) return withMode;
+
+  // If it's already absolute, leave it alone
   if (path.isAbsolute(screenshotPath)) return withMode;
 
   // Resolve relative to session dir
@@ -70,9 +103,41 @@ function parseBrowserValue(raw: string): unknown {
 }
 
 function readPageUrl(sessionName: string): string {
-  const value = parseBrowserValue(ab(`eval ${JSON.stringify('window.location.href')}`, { session: sessionName }));
+  const value = parseBrowserValue(abArgs(['eval', 'window.location.href'], { session: sessionName }));
   if (typeof value !== 'string') throw new Error('agent-browser returned an invalid page URL');
   return value;
+}
+
+export function formatLoggedAction(args: readonly string[]): string {
+  const command = args[0]?.toLowerCase();
+  if (command === 'fill') {
+    return [args[0], args[1], '[REDACTED]'].filter((value) => value !== undefined).join(' ');
+  }
+  if (command === 'type') {
+    const target = args[1]?.match(/^@e\d+$/) ? args[1] : undefined;
+    return [args[0], target, '[REDACTED]'].filter((value) => value !== undefined).join(' ');
+  }
+  return args.join(' ');
+}
+
+function redactEnteredValues(value: string, args: readonly string[]): string {
+  const command = args[0]?.toLowerCase();
+  const entered = command === 'fill'
+    ? args.slice(2)
+    : command === 'type'
+      ? (args[1]?.match(/^@e\d+$/) ? args.slice(2) : args.slice(1))
+      : [];
+  const values = [...new Set([entered.join(' '), ...entered])]
+    .filter(Boolean)
+    .sort((left, right) => right.length - left.length);
+  const variants = values.flatMap((item) => {
+    const encoded = encodeURIComponent(item);
+    return [item, encoded, encoded.replace(/%20/g, '+'), JSON.stringify(item).slice(1, -1)];
+  });
+  return [...new Set(variants)]
+    .filter(Boolean)
+    .sort((left, right) => right.length - left.length)
+    .reduce((redacted, item) => redacted.split(item).join('[REDACTED]'), value);
 }
 
 function redactStderr(stderr: string): string {
@@ -94,28 +159,51 @@ function appendLog(sessionDir: string, entry: SessionLogEntry): void {
 }
 
 function runAssertion(args: string[], session: SessionState): NonNullable<SessionLogEntry['assertion']> {
-  const type = args[1];
-  const expected = args.slice(2).join(' ');
+  const type = args[1]?.trim() || 'unknown';
+  const expected = args.slice(2).join(' ').trim();
   let passed = false;
   let message = '';
   if (type === 'visible' || type === 'absent') {
-    if (!expected) throw new Error(`assert ${type} requires text`);
-    const script = `(() => { const wanted=${JSON.stringify(expected)}; return [...document.querySelectorAll('body *')].some(e => e.textContent?.includes(wanted) && !!(e.offsetWidth||e.offsetHeight||e.getClientRects().length)); })()`;
-    const visible = Boolean(parseBrowserValue(ab(`eval ${JSON.stringify(script)}`, { session: session.sessionName })));
+    if (!expected) return { type, passed: false, message: `assert ${type} requires text` };
+    const script = `(() => {
+      const wanted = ${JSON.stringify(expected)};
+      const matches = [...document.querySelectorAll('body *')].filter((element) => element.textContent?.includes(wanted));
+      const smallest = matches.filter((element) => !matches.some((other) => other !== element && element.contains(other)));
+      const visible = (element) => {
+        if (typeof element.checkVisibility === 'function') {
+          return element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+        }
+        for (let current = element; current; current = current.parentElement) {
+          const style = getComputedStyle(current);
+          if (current.hidden || style.display === 'none' || style.visibility === 'hidden' ||
+              style.visibility === 'collapse' || style.contentVisibility === 'hidden' || Number(style.opacity) === 0) return false;
+        }
+        return element.getClientRects().length > 0;
+      };
+      return smallest.some(visible);
+    })()`;
+    const visible = Boolean(parseBrowserValue(abArgs(['eval', script], { session: session.sessionName })));
     passed = type === 'visible' ? visible : !visible;
     message = `${JSON.stringify(expected)} was ${visible ? 'visible' : 'not visible'}`;
   } else if (type === 'url') {
+    if (!expected) return { type, passed: false, message: 'assert url requires a non-empty URL fragment' };
     const url = readPageUrl(session.sessionName);
     passed = url.includes(expected);
     message = `URL was ${url}`;
   } else if (type === 'no-console-errors') {
-    const errors = ab('errors', { session: session.sessionName });
-    const consoleRaw = ab('console --json', { session: session.sessionName });
+    if (expected) return { type, expected, passed: false, message: 'assert no-console-errors does not accept a value' };
+    const errors = abArgs(['errors'], { session: session.sessionName });
+    const consoleRaw = abArgs(['console', '--json'], { session: session.sessionName });
     const messages = (JSON.parse(consoleRaw)?.data?.messages ?? []).filter((item: { type?: string }) => item.type === 'error');
     passed = (!errors.trim() || errors.trim() === 'No errors') && messages.length === 0;
     message = passed ? 'No console errors were captured' : 'Console errors were captured';
   } else {
-    throw new Error(`Unknown assertion ${type}. Use visible, absent, url, or no-console-errors.`);
+    return {
+      type,
+      ...(expected ? { expected } : {}),
+      passed: false,
+      message: `Unknown assertion ${JSON.stringify(type)}. Use visible, absent, url, or no-console-errors.`,
+    };
   }
   return { type, expected: expected || undefined, passed, message };
 }
@@ -207,18 +295,19 @@ function captureElementData(
 
     // Strategy 1: Try id-based selector (works for inputs with id attributes)
     let elemId = '';
-    try { elemId = ab(`get attr ${ref} id`, { session: sessionName }); } catch { /* empty */ }
+    try { elemId = abArgs(['get', 'attr', ref, 'id'], { session: sessionName }); } catch { /* empty */ }
 
     if (elemId) {
       try {
-        const raw = ab(`get box '#${elemId}'`, { session: sessionName });
+        const raw = abArgs(['get', 'box', `#${elemId}`], { session: sessionName });
         bbox = JSON.parse(raw);
       } catch { /* empty */ }
 
       // For inputs, get label from associated <label> via eval (doesn't invalidate refs)
       try {
-        const raw = ab(
-          `eval "document.getElementById('${elemId}')?.labels?.[0]?.textContent||document.getElementById('${elemId}')?.placeholder||document.getElementById('${elemId}')?.getAttribute('aria-label')||''"`,
+        const expression = `(() => { const element = document.getElementById(${JSON.stringify(elemId)}); return element?.labels?.[0]?.textContent || element?.placeholder || element?.getAttribute('aria-label') || ''; })()`;
+        const raw = abArgs(
+          ['eval', expression],
           { session: sessionName },
         );
         label = JSON.parse(raw) || '';
@@ -227,21 +316,20 @@ function captureElementData(
 
     // Strategy 2: Try text-based selector (works for links, buttons)
     if (!bbox) {
-      try { label = ab(`get text ${ref}`, { session: sessionName }); } catch { /* empty */ }
+      try { label = abArgs(['get', 'text', ref], { session: sessionName }); } catch { /* empty */ }
       if (!label) {
-        try { label = ab(`get attr ${ref} placeholder`, { session: sessionName }); } catch { /* empty */ }
+        try { label = abArgs(['get', 'attr', ref, 'placeholder'], { session: sessionName }); } catch { /* empty */ }
       }
       if (!label) {
-        try { label = ab(`get attr ${ref} aria-label`, { session: sessionName }); } catch { /* empty */ }
+        try { label = abArgs(['get', 'attr', ref, 'aria-label'], { session: sessionName }); } catch { /* empty */ }
       }
       if (!label) {
-        try { label = ab(`get attr ${ref} name`, { session: sessionName }); } catch { /* empty */ }
+        try { label = abArgs(['get', 'attr', ref, 'name'], { session: sessionName }); } catch { /* empty */ }
       }
 
       if (label) {
         try {
-          const escaped = label.replace(/'/g, "\\'");
-          const raw = ab(`get box 'text=${escaped}'`, { session: sessionName });
+          const raw = abArgs(['get', 'box', `text=${label}`], { session: sessionName });
           bbox = JSON.parse(raw);
         } catch { /* empty */ }
       }
@@ -279,7 +367,7 @@ function isRefTargetedAction(args: string[]): boolean {
  * 7. If action was `set viewport`, update cached viewport in session state
  */
 export async function execCommand(args: string[]): Promise<void> {
-  const action = args.join(' ');
+  const action = formatLoggedAction(args);
 
   // Load session state
   const config = loadConfig();
@@ -318,9 +406,6 @@ export async function execCommand(args: string[]): Promise<void> {
   let capturedStderr = '';
   let assertion: NonNullable<SessionLogEntry['assertion']> | undefined;
 
-  // Build shell command with proper quoting
-  const shellCmd = buildShellCommand(resolvedArgs, session?.sessionName);
-
   // Pass through to agent-browser
   try {
     let result: string;
@@ -328,18 +413,16 @@ export async function execCommand(args: string[]): Promise<void> {
       assertion = runAssertion(args, session);
       result = assertion.message;
     } else {
-      result = execSync(shellCmd, {
-      encoding: 'utf-8',
-      timeout: 60000,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      });
+      result = abArgs(resolvedArgs, { timeoutMs: 60000, session: session?.sessionName });
     }
     success = assertion ? assertion.passed : true;
     if (assertion && !assertion.passed) {
       exitStatus = 1;
       process.exitCode = 1;
     }
-    if (result.trim()) {
+    if (assertion && !assertion.passed) {
+      process.stderr.write(`Error: ${result}\n`);
+    } else if (result.trim()) {
       process.stdout.write(result);
       // Ensure trailing newline
       if (!result.endsWith('\n')) {
@@ -348,12 +431,16 @@ export async function execCommand(args: string[]): Promise<void> {
     }
   } catch (error: any) {
     // Print stderr and exit with the same code
-    const stderr = error?.stderr?.toString?.() || '';
-    capturedStderr = redactStderr(stderr || error?.message || 'Unknown error');
-    exitStatus = error?.status || 1;
-    const stdout = error?.stdout?.toString?.() || '';
-    if (stdout) process.stdout.write(stdout);
-    if (stderr) process.stderr.write(stderr);
+    const processError = error?.cause ?? error;
+    const stderr = processError?.stderr?.toString?.() || '';
+    const storedError = stderr || ((args[0] === 'fill' || args[0] === 'type')
+      ? 'Browser command failed'
+      : error?.message || 'Unknown error');
+    capturedStderr = redactStderr(redactEnteredValues(storedError, args));
+    exitStatus = processError?.status || 1;
+    const stdout = processError?.stdout?.toString?.() || '';
+    if (stdout) process.stdout.write(redactEnteredValues(stdout, args));
+    if (stderr) process.stderr.write(redactEnteredValues(stderr, args));
     const hint = describeSelectorSyntaxError(args, stderr);
     if (hint) process.stderr.write(hint);
     process.exitCode = exitStatus;
@@ -373,7 +460,9 @@ export async function execCommand(args: string[]): Promise<void> {
         ...(elementData ? { element: elementData } : {}),
         ...(assertion ? { assertion } : {}),
       };
-      try { entry.resultingUrl = readPageUrl(session.sessionName); } catch { /* browser unavailable */ }
+      try {
+        entry.resultingUrl = redactEnteredValues(readPageUrl(session.sessionName), args);
+      } catch { /* browser unavailable */ }
       if (args[0] === 'screenshot') {
         const screenshotPath = resolvedArgs.find((arg) => arg.endsWith('.png'));
         const dimensions = screenshotPath ? pngDimensions(screenshotPath) : undefined;
@@ -391,7 +480,7 @@ export async function execCommand(args: string[]): Promise<void> {
   if (session && args[0] === 'set' && args[1] === 'viewport') {
     let actualViewport: { width: number; height: number } | null = null;
     try {
-      const vpJson = ab("eval 'JSON.stringify({width: window.innerWidth, height: window.innerHeight})'", {
+      const vpJson = abArgs(['eval', 'JSON.stringify({width: window.innerWidth, height: window.innerHeight})'], {
         session: session.sessionName,
       });
       const vp = parseBrowserValue(vpJson) as { width?: unknown; height?: unknown };

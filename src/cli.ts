@@ -1,4 +1,4 @@
-import { Command } from 'commander';
+import { Command, InvalidArgumentError } from 'commander';
 import { installCommand } from './commands/install.js';
 import { startCommand } from './commands/start.js';
 import { stopCommand } from './commands/stop.js';
@@ -9,6 +9,17 @@ import { execCommand } from './commands/exec.js';
 import { doctorCommand } from './commands/doctor.js';
 import { runCommand } from './commands/run.js';
 import { PROOFSHOT_VERSION } from './version.js';
+
+export function parsePort(value: string): number {
+  if (!/^\d+$/.test(value)) {
+    throw new InvalidArgumentError('Port must be an integer from 1 to 65535.');
+  }
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new InvalidArgumentError('Port must be an integer from 1 to 65535.');
+  }
+  return port;
+}
 
 export function createCLI(): Command {
   const program = new Command();
@@ -32,7 +43,7 @@ export function createCLI(): Command {
     .command('start')
     .description('Start a verification session: browser, recording, error capture')
     .option('--description <text>', 'What is being verified (included in the proof report)')
-    .option('--port <port>', 'Override detected port', parseInt)
+    .option('--port <port>', 'Override detected port', parsePort)
     .option('--run <command>', 'Start this command and capture its logs')
     .option('--headed', 'Show browser window for debugging')
     .option('--output <dir>', 'Custom output directory')

@@ -84,6 +84,7 @@ export async function diffCommand(options: DiffOptions): Promise<void> {
     if (!baselineFiles.includes(file)) {
       console.log(chalk.cyan('+') + ` ${file}: new page (no baseline)`);
       hasChanges = true;
+      exceedsThreshold = true;
     }
   }
 
