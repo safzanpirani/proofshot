@@ -454,23 +454,14 @@ export async function execCommand(args: string[]): Promise<void> {
 
   // If the action was `set viewport`, update cached viewport in session state
   if (session && args[0] === 'set' && args[1] === 'viewport') {
-    let actualViewport: { width: number; height: number } | null = null;
-    try {
-      const vpJson = abArgs(['eval', 'JSON.stringify({width: window.innerWidth, height: window.innerHeight})'], {
-        session: session.sessionName,
-      });
-      const vp = parseBrowserValue(vpJson) as { width?: unknown; height?: unknown };
-      if (!vp || typeof vp.width !== 'number' || typeof vp.height !== 'number' || !Number.isInteger(vp.width) || !Number.isInteger(vp.height)) throw new Error('invalid viewport response');
-      const verifiedViewport = { width: vp.width, height: vp.height };
-      session.viewport = verifiedViewport;
-      session.viewportChanges.push({ ...verifiedViewport, timestamp: new Date().toISOString() });
-      actualViewport = verifiedViewport;
-      saveSession(session);
-    } catch {
-      // Non-critical — viewport cache stays stale
-    }
     const requestedWidth = Number(args[2]);
     const requestedHeight = Number(args[3]);
+    const actualViewport = settleViewport(session.sessionName, requestedWidth, requestedHeight, resolvedArgs);
+    if (actualViewport) {
+      session.viewport = actualViewport;
+      session.viewportChanges.push({ ...actualViewport, timestamp: new Date().toISOString() });
+      saveSession(session);
+    }
     if (!actualViewport || actualViewport.width !== requestedWidth || actualViewport.height !== requestedHeight) {
       console.error(
         `Error: agent-browser reported success but the viewport remained ` +
@@ -480,6 +471,57 @@ export async function execCommand(args: string[]): Promise<void> {
       process.exitCode = 1;
     }
   }
+}
+
+/** Read the live viewport once; null when the browser cannot answer. */
+function readViewport(sessionName: string): { width: number; height: number } | null {
+  try {
+    const vpJson = abArgs(['eval', 'JSON.stringify({width: window.innerWidth, height: window.innerHeight})'], {
+      session: sessionName,
+    });
+    const vp = parseBrowserValue(vpJson) as { width?: unknown; height?: unknown };
+    if (!vp || typeof vp.width !== 'number' || typeof vp.height !== 'number' || !Number.isInteger(vp.width) || !Number.isInteger(vp.height)) return null;
+    return { width: vp.width, height: vp.height };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * agent-browser 0.35 drops `set viewport` about half the time while a
+ * recording is active, and re-issuing the identical size is ignored as well.
+ * Resizing to a neighbouring size first and then to the requested one lands
+ * reliably, so the retry nudges before it retries.
+ */
+function settleViewport(
+  sessionName: string,
+  width: number,
+  height: number,
+  setArgs: readonly string[],
+): { width: number; height: number } | null {
+  const deadlineMs = 1500;
+  const stepMs = 150;
+  let last: { width: number; height: number } | null = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const started = Date.now();
+    while (Date.now() - started < deadlineMs) {
+      last = readViewport(sessionName);
+      if (last && last.width === width && last.height === height) return last;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, stepMs);
+    }
+    if (attempt === 0) {
+      try {
+        const nudge = setArgs.map((arg, index) => (index === 2 ? String(width + 1) : index === 3 ? String(height + 1) : arg));
+        abArgs(nudge, { timeoutMs: 60000, session: sessionName });
+        // A read between the two resizes is what makes the second one land.
+        readViewport(sessionName);
+        abArgs(setArgs, { timeoutMs: 60000, session: sessionName });
+      } catch {
+        return last;
+      }
+    }
+  }
+  return last;
 }
 
 /** Playwright-style engine prefixes that agent-browser's selectors do not accept. */

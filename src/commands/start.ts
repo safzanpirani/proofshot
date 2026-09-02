@@ -53,11 +53,27 @@ export function hashWorkingTreeDiff(trackedDiff: Buffer, untrackedFiles: string[
   return hash.digest('hex');
 }
 
+/** Port named by an explicit --url, when it points at this machine. */
+export function portFromUrl(url: string): number | undefined {
+  let parsed: URL;
+  try { parsed = new URL(url); } catch { return undefined; }
+  const local = ['localhost', '127.0.0.1', '[::1]', '0.0.0.0'].includes(parsed.hostname);
+  if (!local) return undefined;
+  if (parsed.port) return Number(parsed.port);
+  return parsed.protocol === 'https:' ? 443 : 80;
+}
+
 export async function startCommand(options: StartOptions): Promise<boolean> {
   const config = loadConfig();
   const defaultOutputDir = path.resolve(config.output);
   setAgentBrowserDefaults({ configPath: config.browser.configPath });
   if (options.port) config.devServer.port = options.port;
+  else if (options.url) {
+    // `--url http://localhost:43112/x` already names the port; do not wait on
+    // the configured default (3000) for a server that will never listen there.
+    const inferred = portFromUrl(options.url);
+    if (inferred !== undefined) config.devServer.port = inferred;
+  }
   if (options.output) config.output = options.output;
   if (options.headed !== undefined) config.headless = !options.headed;
 
