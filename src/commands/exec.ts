@@ -191,7 +191,10 @@ function runAssertion(args: string[], session: SessionState): NonNullable<Sessio
     const script = `(() => {
       const wanted = ${JSON.stringify(expected)};
       const matches = [...document.querySelectorAll('body *')].filter((element) => element.textContent?.includes(wanted));
-      const smallest = matches.filter((element) => !matches.some((other) => other !== element && element.contains(other)));
+      // A matching descendant also makes every intermediate parent match.
+      // Mark direct parents once instead of comparing every pair of matches.
+      const matchedParents = new Set(matches.map((element) => element.parentElement));
+      const smallest = matches.filter((element) => !matchedParents.has(element));
       const visible = (element) => {
         if (typeof element.checkVisibility === 'function') {
           return element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });

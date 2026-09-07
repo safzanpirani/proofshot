@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { runInNewContext } from 'node:vm';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SessionState } from '../session/state.js';
 import { execCommand, readSessionLog } from './exec.js';
@@ -103,6 +104,47 @@ describe('execCommand local assertions and logging', () => {
     expect(evalCall?.[0][1]).toContain('element.checkVisibility');
     expect(evalCall?.[0][1]).toContain('getComputedStyle(current)');
     expect(readSessionLog(sessionDir).entries[0].assertion).toMatchObject({ passed: false });
+  });
+
+  it.each([
+    ['visible', false, true],
+    ['absent', false, false],
+    ['visible', true, false],
+    ['absent', true, true],
+  ])('preserves %s assertions for nested matches (hidden=%s)', async (type, hidden, passed) => {
+    const parent = { textContent: 'Needle', parentElement: null, checkVisibility: () => true };
+    const child = { textContent: 'Needle', parentElement: parent, checkVisibility: () => !hidden };
+    mocks.abArgs.mockImplementation((args: string[]) => args[1]?.includes('querySelectorAll')
+      ? JSON.stringify(runInNewContext(args[1], { document: { querySelectorAll: () => [parent, child] } })) : '');
+    await execCommand(['assert', String(type), 'Needle']);
+    expect(readSessionLog(sessionDir).entries[0].assertion?.passed).toBe(passed);
+  });
+
+  it('matches text spanning siblings while rejecting an unrelated hidden leaf', async () => {
+    const parent = { textContent: 'Hello world', parentElement: null, checkVisibility: () => true };
+    const nodes = [parent,
+      { textContent: 'Hello ', parentElement: parent, checkVisibility: () => true },
+      { textContent: 'world', parentElement: parent, checkVisibility: () => true },
+      { textContent: 'Hello world', parentElement: null, checkVisibility: () => false }];
+    mocks.abArgs.mockImplementation((args: string[]) => args[1]?.includes('querySelectorAll')
+      ? JSON.stringify(runInNewContext(args[1], { document: { querySelectorAll: () => nodes } })) : '');
+    await execCommand(['assert', 'visible', 'Hello world']);
+    expect(readSessionLog(sessionDir).entries[0].assertion?.passed).toBe(true);
+  });
+
+  it('reads each parent once on a large set of matches without containment scans', async () => {
+    let parentReads = 0;
+    const nodes = Array.from({ length: 10000 }, () => ({
+      textContent: 'Needle',
+      get parentElement() { parentReads++; return null; },
+      contains: () => { throw new Error('Unexpected pairwise scan'); },
+      checkVisibility: () => false,
+    }));
+    mocks.abArgs.mockImplementation((args: string[]) => args[1]?.includes('querySelectorAll')
+      ? JSON.stringify(runInNewContext(args[1], { document: { querySelectorAll: () => nodes } })) : '');
+    await execCommand(['assert', 'absent', 'Needle']);
+    expect(readSessionLog(sessionDir).entries[0].assertion?.passed).toBe(true);
+    expect(parentReads).toBe(nodes.length);
   });
 
   it('does not write entered values into viewer-bound session data', async () => {
