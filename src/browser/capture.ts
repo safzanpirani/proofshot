@@ -46,21 +46,42 @@ export function diffScreenshots(
   const currentPng = PNG.sync.read(fs.readFileSync(current));
   const width = Math.max(baselinePng.width, currentPng.width);
   const height = Math.max(baselinePng.height, currentPng.height);
-  const baselineData = normalizeImageSize(baselinePng, width, height);
-  const currentData = normalizeImageSize(currentPng, width, height);
-  const diff = new PNG({ width, height });
-  const mismatchedPixels = pixelmatch(baselineData, currentData, diff.data, width, height, {
+  const overlapWidth = Math.min(baselinePng.width, currentPng.width);
+  const overlapHeight = Math.min(baselinePng.height, currentPng.height);
+  const baselineData = cropImageData(baselinePng, overlapWidth, overlapHeight);
+  const currentData = cropImageData(currentPng, overlapWidth, overlapHeight);
+  const overlapDiff = new PNG({ width: overlapWidth, height: overlapHeight });
+  const mismatchedPixels = pixelmatch(baselineData, currentData, overlapDiff.data, overlapWidth, overlapHeight, {
     threshold: 0.1,
   });
+  if (baselinePng.width === currentPng.width && baselinePng.height === currentPng.height) {
+    fs.writeFileSync(outputPath, PNG.sync.write(overlapDiff));
+    return (mismatchedPixels / (width * height)) * 100;
+  }
+
+  // Added/removed canvas is a change even when it is blank white. Compare only
+  // the shared area, then mark pixels present in exactly one screenshot.
+  const diff = new PNG({ width, height });
+  PNG.bitblt(overlapDiff, diff, 0, 0, overlapWidth, overlapHeight, 0, 0);
+  for (let row = 0; row < height; row++) {
+    for (let column = row < overlapHeight ? overlapWidth : 0; column < width; column++) {
+      if ((column < baselinePng.width && row < baselinePng.height) ||
+        (column < currentPng.width && row < currentPng.height)) {
+        diff.data.set([255, 0, 0, 255], (row * width + column) * 4);
+      }
+    }
+  }
+  const overlapArea = overlapWidth * overlapHeight;
+  const unionArea = baselinePng.width * baselinePng.height + currentPng.width * currentPng.height - overlapArea;
   fs.writeFileSync(outputPath, PNG.sync.write(diff));
-  return (mismatchedPixels / (width * height)) * 100;
+  return ((mismatchedPixels + unionArea - overlapArea) / unionArea) * 100;
 }
 
-function normalizeImageSize(image: PNG, width: number, height: number): Buffer {
+function cropImageData(image: PNG, width: number, height: number): Buffer {
   if (image.width === width && image.height === height) return image.data;
-  const data = Buffer.alloc(width * height * 4, 255);
-  for (let row = 0; row < image.height; row += 1) {
-    image.data.copy(data, row * width * 4, row * image.width * 4, (row + 1) * image.width * 4);
+  const data = Buffer.alloc(width * height * 4);
+  for (let row = 0; row < height; row += 1) {
+    image.data.copy(data, row * width * 4, row * image.width * 4, (row * image.width + width) * 4);
   }
   return data;
 }

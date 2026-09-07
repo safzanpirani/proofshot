@@ -87,10 +87,7 @@ Each `exec` call:
 5. Appends the outcome to `session-log.jsonl` with start and finish times, exit status, resulting URL, assertion data, and redacted diagnostics
 6. Returns agent-browser's output and status
 
-The element data capture uses a multi-strategy approach because agent-browser's `get box` command doesn't accept refs directly:
-- Try to get the element's `id` attribute, then query by `#id`
-- Fall back to getting the element's text content, then query by `text=<label>`
-- If both fail, skip element data (overlays won't render for this action, but it's non-critical)
+Element data capture reads the exact ref with `get box --json`, then reads its text label. Each optional read has a 1.5-second timeout. When the browser cannot resolve the box, ProofShot skips overlay data and proceeds with the action. This avoids ambiguous text selectors and handles IDs containing CSS punctuation.
 
 ### Stop
 

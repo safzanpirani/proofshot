@@ -36,4 +36,22 @@ describe('runCommand', () => {
     expect(mocks.execCommand).not.toHaveBeenCalled();
     expect(mocks.stopCommand).not.toHaveBeenCalled();
   });
+
+  it.each(['set', 'open'])('stops immediately after failed %s setup, even without steps', async (command) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'proofshot-run-setup-'));
+    const scenarioPath = path.join(directory, 'scenario.json');
+    fs.writeFileSync(scenarioPath, JSON.stringify({ port: 3000, url: '/', viewports: [[390, 844], [1280, 720]], steps: [] }));
+    mocks.startCommand.mockResolvedValue(true);
+    mocks.execCommand.mockImplementation(async (args: string[]) => {
+      if (args[0] === command) process.exitCode = 1;
+    });
+    try {
+      await expect(runCommand(scenarioPath)).rejects.toThrow(/Scenario .* failed/);
+      expect(mocks.execCommand).toHaveBeenCalledTimes(command === 'set' ? 1 : 2);
+      expect(mocks.stopCommand).toHaveBeenCalledOnce();
+      expect(process.exitCode).toBe(1);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
 });

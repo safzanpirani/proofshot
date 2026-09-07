@@ -73,6 +73,7 @@ describe('execCommand local assertions and logging', () => {
     process.exitCode = originalExitCode;
     vi.restoreAllMocks();
     Object.values(mocks).forEach((mock) => mock.mockReset());
+    fs.rmSync(sessionDir, { recursive: true, force: true });
   });
 
   it.each([
@@ -150,5 +151,102 @@ describe('execCommand local assertions and logging', () => {
     expect(terminalOutput).not.toContain(enteredValue);
     expect(terminalOutput).toContain('[REDACTED]');
     expect(fs.readFileSync(path.join(sessionDir, 'session-log.jsonl'), 'utf-8')).not.toContain(enteredValue);
+  });
+
+  it.each(['{}', 'null', '{"success":false,"data":{"messages":[]}}', '{"data":{"messages":[{}]}}'])
+    ('does not pass console assertions for malformed data: %s', async (response) => {
+      mocks.abArgs.mockImplementation((args: string[]) => args[0] === 'console' ? response : '');
+      await execCommand(['assert', 'no-console-errors']);
+      expect(process.exitCode).toBe(1);
+      expect(readSessionLog(sessionDir).entries[0]).toMatchObject({ success: false, exitStatus: 1 });
+    });
+
+  it('recognizes console errors in the supported bare-array response', async () => {
+    mocks.abArgs.mockImplementation((args: string[]) => args[0] === 'console'
+      ? JSON.stringify([{ type: 'error', text: 'Application failed', timestamp: Date.now() }]) : '');
+    await execCommand(['assert', 'no-console-errors']);
+    expect(readSessionLog(sessionDir).entries[0].assertion?.passed).toBe(false);
+  });
+
+  it.each(['log', 'error'])('handles untimed %s messages from the native browser', async (type) => {
+    mocks.abArgs.mockImplementation((args: string[]) => args[0] === 'console'
+      ? JSON.stringify({ success: true, data: { messages: [{ type, text: 'Review console capture' }] } }) : '');
+    await execCommand(['assert', 'no-console-errors']);
+    expect(readSessionLog(sessionDir).entries[0].assertion?.passed).toBe(type !== 'error');
+  });
+
+  it('rejects a non-boolean visibility response', async () => {
+    mocks.abArgs.mockReturnValue('{"error":"evaluation unavailable"}');
+    await execCommand(['assert', 'visible', 'Saved']);
+    expect(readSessionLog(sessionDir).entries[0]).toMatchObject({ success: false, exitStatus: 1 });
+  });
+
+  it('logs viewport verification failures and includes recovery in the outcome', async () => {
+    let now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now += 500);
+    vi.spyOn(Atomics, 'wait').mockReturnValue('timed-out');
+    mocks.abArgs.mockImplementation((args: string[]) => args[0] === 'eval'
+      ? JSON.stringify({ width: 1280, height: 720 }) : 'Done');
+    await execCommand(['set', 'viewport', '390', '844']);
+    expect(mocks.abArgs).toHaveBeenCalledWith(['set', 'viewport', '391', '845'], expect.anything());
+    expect(readSessionLog(sessionDir).entries[0]).toMatchObject({ success: false, exitStatus: 1,
+      stderr: expect.stringContaining('requested 390x844') });
+    expect(process.stdout.write).not.toHaveBeenCalledWith('Done');
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('does not resize again after the original viewport command fails', async () => {
+    mocks.abArgs.mockImplementation((args: string[]) => {
+      if (args[0] === 'set') throw new Error('Browser unavailable');
+      return '';
+    });
+    await execCommand(['set', 'viewport', '390', '844']);
+    expect(mocks.abArgs.mock.calls.filter(([args]) => args[0] === 'set')).toHaveLength(1);
+    expect(mocks.saveSession).not.toHaveBeenCalled();
+  });
+
+  it('records a recovered viewport as successful', async () => {
+    let now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now += 500);
+    vi.spyOn(Atomics, 'wait').mockReturnValue('timed-out');
+    let resizes = 0;
+    mocks.abArgs.mockImplementation((args: string[]) => {
+      if (args[0] === 'set') { resizes++; return 'Done'; }
+      return JSON.stringify(resizes >= 3 ? { width: 390, height: 844 } : { width: 1280, height: 720 });
+    });
+    await execCommand(['set', 'viewport', '390', '844']);
+    expect(resizes).toBe(3);
+    expect(readSessionLog(sessionDir).entries[0]).toMatchObject({ success: true, exitStatus: 0 });
+    expect(mocks.saveSession).toHaveBeenCalledWith(expect.objectContaining({ viewport: { width: 390, height: 844 } }));
+  });
+
+  it('captures the exact ref with two bounded reads before clicking', async () => {
+    mocks.abArgs.mockImplementation((args: string[]) => {
+      if (args[1] === 'box') return JSON.stringify({ success: true, data: { x: 10, y: 20, width: 30, height: 40 } });
+      if (args[1] === 'text') return JSON.stringify({ success: true, data: { text: 'Save' } });
+      return '';
+    });
+    await execCommand(['click', '@e3']);
+    expect(mocks.abArgs.mock.calls.slice(0, 3)).toEqual([
+      [['get', 'box', '@e3', '--json'], { session: 'proofshot-test', timeoutMs: 1500 }],
+      [['get', 'text', '@e3', '--json'], { session: 'proofshot-test', timeoutMs: 1500 }],
+      [['click', '@e3'], { session: 'proofshot-test', timeoutMs: 60000 }],
+    ]);
+    expect(readSessionLog(sessionDir).entries[0].element).toMatchObject({ label: 'Save', bbox: { x: 10, y: 20, width: 30, height: 40 } });
+  });
+
+  it('still executes the action when optional overlay collection fails', async () => {
+    mocks.abArgs.mockImplementation((args: string[]) => {
+      if (args[0] === 'get') throw new Error('Unsupported ref');
+      return '';
+    });
+    await execCommand(['click', '@e3']);
+    expect(mocks.abArgs.mock.calls.filter(([args]) => args[0] === 'get')).toHaveLength(1);
+    expect(readSessionLog(sessionDir).entries[0]).toMatchObject({ success: true });
+  });
+
+  it('does not look up refs found inside entered text', async () => {
+    await execCommand(['fill', '#message', 'Ask @e3 for help']);
+    expect(mocks.abArgs.mock.calls.some(([args]) => args[0] === 'get')).toBe(false);
   });
 });

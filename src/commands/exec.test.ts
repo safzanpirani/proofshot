@@ -54,15 +54,20 @@ describe('session log safety', () => {
   it('retains valid JSONL records and reports malformed lines', () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'proofshot-jsonl-test-'));
     fs.writeFileSync(path.join(directory, 'session-log.jsonl'), [
-      JSON.stringify({ action: 'first', success: true }),
+      JSON.stringify({ action: 'first', success: true, exitStatus: 0, relativeTimeSec: 0,
+        timestamp: '2026-01-01T00:00:00Z', startedAt: '2026-01-01T00:00:00Z', finishedAt: '2026-01-01T00:00:01Z' }),
       '{"action":"torn',
-      JSON.stringify({ action: 'third', success: false }),
+      JSON.stringify({ action: 'third', success: false, exitStatus: 1, relativeTimeSec: 1,
+        timestamp: '2026-01-01T00:00:01Z', startedAt: '2026-01-01T00:00:01Z', finishedAt: '2026-01-01T00:00:02Z' }),
+      'null',
+      '[]',
+      '{"action":"invalid", "success":true}',
       '',
     ].join('\n'));
 
     const result = readSessionLog(directory);
     expect(result.entries.map((entry) => entry.action)).toEqual(['first', 'third']);
-    expect(result.malformedLines).toEqual([2]);
+    expect(result.malformedLines).toEqual([2, 4, 5, 6]);
   });
 });
 

@@ -116,10 +116,11 @@ export async function stopCommand(options: StopOptions): Promise<void> {
     const consoleMessages = getConsoleOutputJson(session.sessionName);
     consoleEntries = consoleMessages.map((msg) => ({
       text: `[${msg.type}] ${msg.text}`,
-      relativeTimeSec: Math.max(0, parseFloat(((msg.timestamp - startTime) / 1000).toFixed(1))),
+      relativeTimeSec: msg.timestamp === undefined ? -1
+        : Math.max(0, parseFloat(((msg.timestamp - startTime) / 1000).toFixed(1))),
     }));
   } catch (error) {
-    consoleStatus = /disconnect|closed|browser/i.test(error instanceof Error ? error.message : String(error))
+    consoleStatus = /disconnect|closed/i.test(error instanceof Error ? error.message : String(error))
       ? 'browser-disconnected'
       : 'unavailable';
     incompleteReasons.push(`Console collection ${consoleStatus}: ${error instanceof Error ? error.message : error}`);

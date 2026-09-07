@@ -5,6 +5,7 @@ import { loadConfig } from '../utils/config.js';
 import { abArgs, setAgentBrowserDefaults } from '../utils/exec.js';
 import { loadSession, saveSession, type SessionState } from '../session/state.js';
 import { writeJsonAtomic } from '../utils/atomic.js';
+import { getConsoleOutputJson } from '../browser/session.js';
 
 const SESSION_LOG_FILENAME = 'session-log.jsonl';
 const RESULT_FILENAME = 'result.json';
@@ -33,6 +34,21 @@ export interface SessionLogReadResult {
   malformedLines: number[];
 }
 
+function isSessionLogEntry(value: unknown): value is SessionLogEntry {
+  if (!value || typeof value !== 'object') return false;
+  const entry = value as SessionLogEntry;
+  return typeof entry.action === 'string' &&
+    typeof entry.relativeTimeSec === 'number' && Number.isFinite(entry.relativeTimeSec) &&
+    [entry.timestamp, entry.startedAt, entry.finishedAt].every((time) =>
+      typeof time === 'string' && Number.isFinite(Date.parse(time))) &&
+    Date.parse(entry.finishedAt) >= Date.parse(entry.startedAt) &&
+    Number.isInteger(entry.exitStatus) && entry.exitStatus >= 0 &&
+    typeof entry.success === 'boolean' && entry.success === (entry.exitStatus === 0) &&
+    (entry.assertion === undefined || (entry.assertion !== null &&
+      typeof entry.assertion.type === 'string' && typeof entry.assertion.passed === 'boolean' &&
+      typeof entry.assertion.message === 'string' && entry.assertion.passed === entry.success));
+}
+
 /** Read all complete JSONL records and report malformed lines by 1-based line number. */
 export function readSessionLog(sessionDir: string): SessionLogReadResult {
   const logPath = path.join(sessionDir, SESSION_LOG_FILENAME);
@@ -44,7 +60,9 @@ export function readSessionLog(sessionDir: string): SessionLogReadResult {
   lines.forEach((line, index) => {
     if (!line.trim()) return;
     try {
-      entries.push(JSON.parse(line) as SessionLogEntry);
+      const entry: unknown = JSON.parse(line);
+      if (!isSessionLogEntry(entry)) throw new Error('Invalid action record');
+      entries.push(entry);
     } catch {
       malformedLines.push(index + 1);
     }
@@ -147,11 +165,16 @@ function redactStderr(stderr: string): string {
 }
 
 function pngDimensions(filePath: string): { width: number; height: number } | undefined {
+  let descriptor: number | undefined;
   try {
-    const bytes = fs.readFileSync(filePath);
-    if (bytes.length < 24 || bytes.toString('ascii', 1, 4) !== 'PNG') return undefined;
+    descriptor = fs.openSync(filePath, 'r');
+    const bytes = Buffer.alloc(24);
+    if (fs.readSync(descriptor, bytes, 0, bytes.length, 0) !== bytes.length ||
+      !bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) ||
+      bytes.toString('ascii', 12, 16) !== 'IHDR') return undefined;
     return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
   } catch { return undefined; }
+  finally { if (descriptor !== undefined) fs.closeSync(descriptor); }
 }
 
 function appendLog(sessionDir: string, entry: SessionLogEntry): void {
@@ -182,7 +205,8 @@ function runAssertion(args: string[], session: SessionState): NonNullable<Sessio
       };
       return smallest.some(visible);
     })()`;
-    const visible = Boolean(parseBrowserValue(abArgs(['eval', script], { session: session.sessionName })));
+    const visible = parseBrowserValue(abArgs(['eval', script], { session: session.sessionName }));
+    if (typeof visible !== 'boolean') throw new Error('agent-browser returned malformed visibility data');
     passed = type === 'visible' ? visible : !visible;
     message = `${JSON.stringify(expected)} was ${visible ? 'visible' : 'not visible'}`;
   } else if (type === 'url') {
@@ -193,8 +217,7 @@ function runAssertion(args: string[], session: SessionState): NonNullable<Sessio
   } else if (type === 'no-console-errors') {
     if (expected) return { type, expected, passed: false, message: 'assert no-console-errors does not accept a value' };
     const errors = abArgs(['errors'], { session: session.sessionName });
-    const consoleRaw = abArgs(['console', '--json'], { session: session.sessionName });
-    const messages = (JSON.parse(consoleRaw)?.data?.messages ?? []).filter((item: { type?: string }) => item.type === 'error');
+    const messages = getConsoleOutputJson(session.sessionName).filter((item) => item.type === 'error');
     passed = (!errors.trim() || errors.trim() === 'No errors') && messages.length === 0;
     message = passed ? 'No console errors were captured' : 'Console errors were captured';
   } else {
@@ -242,23 +265,15 @@ export function materializeCurlInput(args: string[]): {
  * Parse an element ref (@eN) from command args.
  */
 function parseElementRef(args: string[]): string | null {
-  for (const arg of args) {
-    const match = arg.match(/@e\d+/);
-    if (match) return match[0];
-  }
-  return null;
+  return args[1]?.match(/^@e\d+$/)?.[0] ?? null;
 }
 
 /**
  * Capture element bounding box and label before action execution.
  *
- * agent-browser's `get box` doesn't support @eN refs, but `get text` and
- * `get attr` do. Strategy:
- * 1. Try `get attr @eN id` — if found, use `get box #<id>` (reliable for inputs)
- * 2. Otherwise try `get text @eN` — use `get box "text=<label>"` (works for links/buttons)
- * 3. Label comes from get text (links/buttons) or get attr fallback chain (inputs)
- *
- * None of these commands invalidate snapshot refs, so the subsequent action still works.
+ * Resolve the exact ref through the browser instead of reconstructing a selector
+ * from its ID or text. Overlay metadata is optional and must not delay an action
+ * with a chain of long retries. These reads do not invalidate snapshot refs.
  */
 function captureElementData(
   ref: string,
@@ -266,52 +281,17 @@ function captureElementData(
   sessionName?: string,
 ): SessionLogEntry['element'] | null {
   try {
-    let bbox: { x: number; y: number; width: number; height: number } | null = null;
+    const options = { session: sessionName, timeoutMs: 1500 };
+    const raw = JSON.parse(abArgs(['get', 'box', ref, '--json'], options));
+    const bbox = raw?.data ?? raw;
+    if (raw?.success === false || !bbox ||
+      ![bbox.x, bbox.y, bbox.width, bbox.height].every((value) => typeof value === 'number' && Number.isFinite(value)) ||
+      bbox.width <= 0 || bbox.height <= 0) return null;
     let label = '';
-
-    // Strategy 1: Try id-based selector (works for inputs with id attributes)
-    let elemId = '';
-    try { elemId = abArgs(['get', 'attr', ref, 'id'], { session: sessionName }); } catch { /* empty */ }
-
-    if (elemId) {
-      try {
-        const raw = abArgs(['get', 'box', `#${elemId}`], { session: sessionName });
-        bbox = JSON.parse(raw);
-      } catch { /* empty */ }
-
-      // For inputs, get label from associated <label> via eval (doesn't invalidate refs)
-      try {
-        const expression = `(() => { const element = document.getElementById(${JSON.stringify(elemId)}); return element?.labels?.[0]?.textContent || element?.placeholder || element?.getAttribute('aria-label') || ''; })()`;
-        const raw = abArgs(
-          ['eval', expression],
-          { session: sessionName },
-        );
-        label = JSON.parse(raw) || '';
-      } catch { /* empty */ }
-    }
-
-    // Strategy 2: Try text-based selector (works for links, buttons)
-    if (!bbox) {
-      try { label = abArgs(['get', 'text', ref], { session: sessionName }); } catch { /* empty */ }
-      if (!label) {
-        try { label = abArgs(['get', 'attr', ref, 'placeholder'], { session: sessionName }); } catch { /* empty */ }
-      }
-      if (!label) {
-        try { label = abArgs(['get', 'attr', ref, 'aria-label'], { session: sessionName }); } catch { /* empty */ }
-      }
-      if (!label) {
-        try { label = abArgs(['get', 'attr', ref, 'name'], { session: sessionName }); } catch { /* empty */ }
-      }
-
-      if (label) {
-        try {
-          const raw = abArgs(['get', 'box', `text=${label}`], { session: sessionName });
-          bbox = JSON.parse(raw);
-        } catch { /* empty */ }
-      }
-    }
-
-    if (!bbox) return null;
+    try {
+      const text = JSON.parse(abArgs(['get', 'text', ref, '--json'], options));
+      if (typeof text?.data?.text === 'string') label = text.data.text;
+    } catch { /* a label is optional */ }
 
     return {
       label: label || '',
@@ -391,6 +371,20 @@ export async function execCommand(args: string[]): Promise<void> {
     } else {
       result = abArgs(resolvedArgs, { timeoutMs: 60000, session: session?.sessionName });
     }
+    // Verification belongs to the action outcome, before logging or printing success.
+    if (session && args[0] === 'set' && args[1] === 'viewport') {
+      const requestedWidth = Number(args[2]);
+      const requestedHeight = Number(args[3]);
+      const actualViewport = settleViewport(session.sessionName, requestedWidth, requestedHeight, resolvedArgs);
+      if (actualViewport) {
+        session.viewport = actualViewport;
+        session.viewportChanges.push({ ...actualViewport, timestamp: new Date().toISOString() });
+        saveSession(session);
+      }
+      if (!actualViewport || actualViewport.width !== requestedWidth || actualViewport.height !== requestedHeight) {
+        throw new Error(`Viewport remained ${actualViewport?.width ?? 'undefined'}x${actualViewport?.height ?? 'undefined'}; requested ${requestedWidth}x${requestedHeight}.`);
+      }
+    }
     success = assertion ? assertion.passed : true;
     if (assertion && !assertion.passed) {
       exitStatus = 1;
@@ -417,6 +411,7 @@ export async function execCommand(args: string[]): Promise<void> {
     const stdout = processError?.stdout?.toString?.() || '';
     if (stdout) process.stdout.write(redactEnteredValues(stdout, args));
     if (stderr) process.stderr.write(redactEnteredValues(stderr, args));
+    else process.stderr.write(`Error: ${capturedStderr}\n`);
     const hint = describeSelectorSyntaxError(args, stderr);
     if (hint) process.stderr.write(hint);
     process.exitCode = exitStatus;
@@ -452,25 +447,6 @@ export async function execCommand(args: string[]): Promise<void> {
     }
   }
 
-  // If the action was `set viewport`, update cached viewport in session state
-  if (session && args[0] === 'set' && args[1] === 'viewport') {
-    const requestedWidth = Number(args[2]);
-    const requestedHeight = Number(args[3]);
-    const actualViewport = settleViewport(session.sessionName, requestedWidth, requestedHeight, resolvedArgs);
-    if (actualViewport) {
-      session.viewport = actualViewport;
-      session.viewportChanges.push({ ...actualViewport, timestamp: new Date().toISOString() });
-      saveSession(session);
-    }
-    if (!actualViewport || actualViewport.width !== requestedWidth || actualViewport.height !== requestedHeight) {
-      console.error(
-        `Error: agent-browser reported success but the viewport remained ` +
-          `${actualViewport?.width ?? 'undefined'}x${actualViewport?.height ?? 'undefined'}; requested ` +
-          `${requestedWidth}x${requestedHeight}.`,
-      );
-      process.exitCode = 1;
-    }
-  }
 }
 
 /** Read the live viewport once; null when the browser cannot answer. */

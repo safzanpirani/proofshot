@@ -82,7 +82,7 @@ export function getConsoleOutput(sessionName?: string): string {
 
 export interface ConsoleMessage {
   text: string;
-  timestamp: number; // epoch ms
+  timestamp?: number; // epoch ms; some browser versions omit timing
   type: string; // log, warn, error, etc.
 }
 
@@ -93,7 +93,10 @@ export function getConsoleOutputJson(sessionName?: string): ConsoleMessage[] {
   const raw = abArgs(['console', '--json'], { session: sessionName });
   const parsed = JSON.parse(raw);
   const messages = parsed?.data?.messages ?? parsed;
-  if (!Array.isArray(messages)) throw new Error('agent-browser returned malformed console data');
+  if (parsed?.success === false || !Array.isArray(messages) || messages.some((message) =>
+    !message || typeof message.text !== 'string' || typeof message.type !== 'string' ||
+    (message.timestamp !== undefined && (typeof message.timestamp !== 'number' || !Number.isFinite(message.timestamp)))
+  )) throw new Error('agent-browser returned malformed console data');
   return messages;
 }
 

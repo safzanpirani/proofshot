@@ -41,7 +41,11 @@ export async function runCommand(scenarioPath: string): Promise<void> {
   try {
     for (const [width, height] of scenario.viewports) {
       await execCommand(['set', 'viewport', String(width), String(height)]);
-      if (scenario.url) await execCommand(['open', `http://localhost:${scenario.port}${scenario.url}`]);
+      if (process.exitCode) throw new Error('Scenario viewport setup failed');
+      if (scenario.url) {
+        await execCommand(['open', `http://localhost:${scenario.port}${scenario.url}`]);
+        if (process.exitCode) throw new Error('Scenario navigation failed');
+      }
       for (const step of scenario.steps) {
         if (typeof step.assertVisible === 'string') await execCommand(['assert', 'visible', step.assertVisible]);
         else if (typeof step.assertAbsent === 'string') await execCommand(['assert', 'absent', step.assertAbsent]);
