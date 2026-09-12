@@ -57,7 +57,9 @@ pump(child.stderr);
 
 // The pump is useless without its child; die together so `stop` only has to
 // kill one process tree.
-child.on('exit', (code) => {
+// Wait for stdout/stderr to drain before closing the log, including output
+// emitted immediately before a failed startup exits.
+child.on('close', (code) => {
   logStream.end(() => process.exit(code ?? 0));
 });
 

@@ -167,6 +167,26 @@ describe('startCommand', () => {
     expect(mocks.saveSession).not.toHaveBeenCalled();
   });
 
+  it('preserves server diagnostics while releasing state after startup fails', async () => {
+    const output = fs.mkdtempSync(path.join(os.tmpdir(), 'proofshot-start-failed-'));
+    const sessionDir = path.join(output, '2026-04-08_07-28-00_test');
+    mocks.ensureOutputDir.mockImplementation((directory: string) => fs.mkdirSync(directory, { recursive: true }));
+    mocks.ensureDevServer.mockImplementation(async (_command, _port, _timeout, logPath: string) => {
+      fs.writeFileSync(logPath, '123\tERR_PNPM_UNSAFE_MODULES_DIR\n');
+      throw new Error('Timed out waiting for port');
+    });
+    try {
+      await expect(startCommand({ output, run: 'pnpm dev' })).rejects.toThrow('process.exit:1');
+      expect(fs.readFileSync(path.join(sessionDir, 'server.log'), 'utf-8')).toContain('ERR_PNPM_UNSAFE_MODULES_DIR');
+      expect(mocks.clearSession).toHaveBeenCalledWith(output);
+      expect(mocks.releaseSessionStartLock).toHaveBeenCalled();
+      expect(mocks.openBrowser).not.toHaveBeenCalled();
+      expect(console.error).toHaveBeenCalledWith(expect.stringContaining(sessionDir));
+    } finally {
+      fs.rmSync(output, { recursive: true, force: true });
+    }
+  });
+
   it('records a pointer when a custom output directory is used', async () => {
     mocks.startRecording.mockImplementation(() => {});
 

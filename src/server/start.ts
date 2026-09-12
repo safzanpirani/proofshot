@@ -19,6 +19,24 @@ export interface ServerStartResult {
   processIdentity: { pid: number; startTime: string; command: string; ownershipToken: string } | null;
 }
 
+/** Read a bounded tail so a noisy startup cannot flood the error message. */
+export function readStartupLogTail(logPath: string): string {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(logPath, 'r');
+    const size = fs.fstatSync(fd).size;
+    const buffer = Buffer.alloc(Math.min(size, 8192));
+    const count = fs.readSync(fd, buffer, 0, buffer.length, Math.max(0, size - buffer.length));
+    let tail = buffer.subarray(0, count).toString('utf-8');
+    if (size > buffer.length) tail = tail.slice(tail.indexOf('\n') + 1);
+    return tail.trimEnd().split('\n').slice(-20).map((line) => line.replace(/^\d+\t/, '')).join('\n');
+  } catch {
+    return '';
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
 /**
  * Kill whatever process is listening on the given port.
  * Retries up to 3 times to ensure the port is actually freed.
@@ -135,10 +153,13 @@ export async function ensureDevServer(
     } catch {
       // Already exited
     }
+    const logTail = readStartupLogTail(logPath);
     throw new Error(
       `Failed to start dev server with "${command}" on port ${port}.\n` +
         `Make sure the command is correct and the port is available.\n` +
-        `Original error: ${error instanceof Error ? error.message : error}`,
+        `Original error: ${error instanceof Error ? error.message : error}\n` +
+        `Server log: ${logPath}` +
+        (logTail ? `\nLast server output:\n${logTail}` : '\nNo server output was captured.'),
     );
   }
 

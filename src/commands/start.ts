@@ -208,7 +208,9 @@ export async function startCommand(options: StartOptions): Promise<boolean> {
     for (const root of sessionRoots) {
       try { clearSession(root); } catch { /* continue releasing other state */ }
     }
-    try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch { /* retain partial diagnostics if removal fails */ }
+    // Failed startup logs and metadata are diagnostic artifacts. Releasing
+    // session state must not erase the explanation for the failure.
+    console.error(chalk.dim(`Startup diagnostics retained at ${sessionDir}`));
     try { releaseStartLock(); } catch { /* process exit will leave a recoverable stale claim */ }
   };
 
